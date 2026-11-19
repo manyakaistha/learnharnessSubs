@@ -5,7 +5,7 @@ import path from "node:path";
 import { ANTIGRAVITY_DIR } from "../../../config.ts";
 import {
 	ANTIGRAVITY_AUTH_URL_PREFIX, AcpRequestError, catalogFromSession, defaultSpawnAcp,
-	newSessionParams, startAcp, tierFromMeta, type AcpConnection, type AcpNewSessionResult,
+	newSessionParams, startAcp, tierFromMeta, variantModelId, type AcpConnection, type AcpNewSessionResult,
 } from "../../agent/antigravity/acp-client.ts";
 import { acquireAntigravityBinary, setAntigravityCatalog } from "../../agent/antigravity/runtime-source.ts";
 import { ANTIGRAVITY_THINKING_SUFFIXES, type AntigravityCatalog } from "../../core/contracts/antigravity.ts";
@@ -48,7 +48,10 @@ export function readAntigravityCatalog(): AntigravityCatalog | null {
 			&& typeof model.name === "string" && Array.isArray(model.thinkingLevels)
 			&& model.thinkingLevels.every((level) => ANTIGRAVITY_THINKING_SUFFIXES.includes(level)))) return null;
 	return {
-		models: catalog.models.map(({ id, name, thinkingLevels }) => ({ id, name, thinkingLevels })),
+		models: catalog.models.map(({ id, name, thinkingLevels, contextWindow }) => ({
+			id, name, thinkingLevels,
+			...(typeof contextWindow === "number" && Number.isSafeInteger(contextWindow) && contextWindow > 0 ? { contextWindow } : {}),
+		})),
 		contextWindow: catalog.contextWindow,
 		updatedAt: catalog.updatedAt,
 	};
@@ -122,6 +125,7 @@ async function discoverModels(connection: AcpConnection, cwd: string): Promise<A
 	let contextWindow: number | null = null;
 	let receivedUsage!: () => void;
 	const usage = new Promise<void>((resolve) => { receivedUsage = resolve; });
+	let sizeWaiter: ((size: number) => void) | undefined;
 	let sessionId: string | undefined;
 	connection.onNotification((method, params) => {
 		if (method !== "session/update") return;
@@ -132,6 +136,7 @@ async function discoverModels(connection: AcpConnection, cwd: string): Promise<A
 			|| !Number.isSafeInteger(update.size) || update.size <= 0) return;
 		contextWindow = update.size;
 		receivedUsage();
+		sizeWaiter?.(update.size);
 	});
 
 	const result = await withTimeout(connection.request<AcpNewSessionResult>("session/new", newSessionParams(cwd, [], "")),
@@ -141,6 +146,24 @@ async function discoverModels(connection: AcpConnection, cwd: string): Promise<A
 	try {
 		await withTimeout(usage, 1_000, "No Antigravity usage data yet.").catch(() => undefined);
 		const catalog = catalogFromSession(result, contextWindow);
+		// Context windows differ per model (e.g. GPT-OSS 131,072 vs Gemini
+		// 1,048,576); agy reports the size after each model switch.
+		// agy sends usage_update only when the size changes, so a switch with
+		// no report keeps the previous model's size.
+		let previous: number | null = contextWindow;
+		for (const model of catalog.models) {
+			const size = new Promise<number>((resolve) => { sizeWaiter = resolve; });
+			try {
+				await withTimeout(connection.request("session/set_model", { sessionId, modelId: variantModelId(model, undefined) }),
+					5_000, "Antigravity took too long to select a model.");
+				previous = await withTimeout(size, 1_500, "No context size change.").catch(() => previous);
+				if (previous !== null) model.contextWindow = previous;
+			} catch {
+				// Selection failed: unknown stays unknown and the catalog-wide report applies.
+			} finally {
+				sizeWaiter = undefined;
+			}
+		}
 		writeRecord(catalogFile, catalog);
 		setAntigravityCatalog(catalog);
 

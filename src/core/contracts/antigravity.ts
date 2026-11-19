@@ -13,6 +13,8 @@ export interface AntigravityModel {
 	name: string;
 	/** Supported thinking suffixes; empty when the model has a single variant. */
 	thinkingLevels: AntigravityThinkingSuffix[];
+	/** Context window agy reported after selecting this model (differs per model). */
+	contextWindow?: number | null;
 }
 
 export interface AntigravityCatalog {

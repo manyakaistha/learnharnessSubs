@@ -16,11 +16,11 @@ async function run(id) {
  let client;
  for (const step of steps) {
   if (step.type === 'chunk') update({ sessionUpdate: step.kind === 'thought' ? 'agent_thought_chunk' : 'agent_message_chunk', content: { type: 'text', text: step.text } });
-  if (step.type === 'usage_update') update({ sessionUpdate: 'usage_update', size: step.size });
+  if (step.type === 'usage_update') update({ sessionUpdate: 'usage_update', size: step.size, ...(step.used === undefined ? {} : { used: step.used }) });
   if (step.type === 'permission') { const result = await request('session/request_permission', { sessionId: 'fake-session', toolCall: { toolCallId: step.id, name: step.name, rawInput: step.args }, options: [{ optionId: 'allow', kind: 'allow_once' }, { optionId: 'deny', kind: 'reject_once' }] }); log({ event: 'permission', result }); }
   if (step.type === 'call') {
    if (!client) { client = new Client({ name: 'fake-agy', version: '1.0.0' }); const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: Object.fromEntries(server.headers.map(h => [h.name, h.value])) } }); await client.connect(transport); await client.listTools(); }
-   try { const result = await client.callTool({ name: step.name, arguments: step.args, _meta: { progressToken: 'fake-progress' } }); log({ event: 'tool-result', result }); update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: result.content.map(c => c.text || '').join('') } }); } catch (error) { log({ event: 'tool-error', message: String(error) }); }
+   try { const result = await client.callTool({ name: step.name, arguments: step.args, _meta: { progressToken: 'fake-progress' } }, undefined, step.timeoutMs ? { timeout: step.timeoutMs } : undefined); log({ event: 'tool-result', result }); update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: result.content.map(c => c.text || '').join('') } }); } catch (error) { log({ event: 'tool-error', message: String(error) }); }
   }
   if (step.type === 'exit') process.exit(17);
   if (step.type === 'wait') return;

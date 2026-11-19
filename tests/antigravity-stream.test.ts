@@ -61,3 +61,21 @@ test('unavailable runtime reports error', async () => { const events = await col
 test('unexpected exit reports error and cleans up', async t => { const s = setup(t, [[{ type: 'exit' }]]); const e = (await turn(s.stream)).at(-1); assert.ok(e?.type === 'error'); assert.match(e.error.errorMessage ?? '', /Antigravity stopped/); await cleaned(s.calls[0]!, s.spec.binary); });
 test('mismatched continuation kills old process and replays in a fresh one', async t => { const s = setup(t, [[permission, call, { type: 'wait' }], [{ type: 'chunk', text: 'fresh' }, { type: 'reply' }]]); const first = done(await turn(s.stream)); const mismatch = { ...result, toolName: 'different' }; const second = done(await turn(s.stream, [hi, first, mismatch])); assert.equal(second.content[0]?.type, 'text'); assert.equal(s.calls.length, 2); await cleaned(s.calls[0]!, s.spec.binary).catch(async () => { await cleaned(s.calls[1]!, s.spec.binary); await cleaned(s.calls[0]!, s.spec.binary); }); await cleaned(s.calls[1]!, s.spec.binary); const prompt = logs(s.calls[1]!.log).find(r => r.message?.method === 'session/prompt').message.params.prompt; assert.match(JSON.stringify(prompt), /sunny/); });
 test('tool batch without session ID releases its process', async t => { const s = setup(t, [[permission, call, { type: 'wait' }]]); const message = done(await turn(s.stream, [hi], { sessionId: undefined })); assert.equal(message.stopReason, 'toolUse'); await cleaned(s.calls[0]!, s.spec.binary); });
+
+test('context usage comes from usage_update.used on tool and final messages', async t => {
+ const s = setup(t, [[{ type: 'usage_update', size: 131072, used: 900 }, permission, call, { type: 'usage_update', size: 131072, used: 1500 }, { type: 'reply', usage: { inputTokens: 2000, outputTokens: 120, cachedReadTokens: 400, thoughtTokens: 7 } }]]);
+ const first = done(await turn(s.stream));
+ assert.equal(first.stopReason, 'toolUse'); assert.deepEqual([first.usage.input, first.usage.output, first.usage.cacheRead, first.usage.totalTokens], [900, 0, 0, 900]); assert.equal((first as any).cliContextWindow, 131072);
+ const second = done(await turn(s.stream, [hi, first, result]));
+ assert.deepEqual([second.usage.input, second.usage.output, second.usage.cacheRead, second.usage.cacheWrite, second.usage.totalTokens, second.usage.reasoning], [1380, 120, 0, 0, 1500, 7]);
+ await cleaned(s.calls[0]!, s.spec.binary);
+});
+test('a held call agy abandons ends the session so the result replays fresh', async t => {
+ const s = setup(t, [[permission, { ...call, timeoutMs: 200 }, { type: 'chunk', text: 'gave up' }, { type: 'reply' }], [{ type: 'chunk', text: 'fresh' }, { type: 'reply' }]]);
+ const first = done(await turn(s.stream)); assert.equal(first.stopReason, 'toolUse');
+ await cleaned(s.calls[0]!, s.spec.binary);
+ const second = done(await turn(s.stream, [hi, first, result]));
+ assert.deepEqual(second.content, [{ type: 'text', text: 'fresh' }]); assert.equal(s.calls.length, 2);
+ assert.match(JSON.stringify(logs(s.calls[1]!.log).find(r => r.message?.method === 'session/prompt').message.params.prompt), /sunny/);
+ await cleaned(s.calls[1]!, s.spec.binary);
+});

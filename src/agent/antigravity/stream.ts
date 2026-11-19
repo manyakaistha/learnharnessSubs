@@ -144,8 +144,9 @@ class AntigravityTurn {
 		}
 	}
 
-	admit(calls: ToolCall[]): void {
+	admit(calls: ToolCall[], contextUsed: number | undefined): void {
 		if (this.finished) return;
+		this.setContextUsage(contextUsed);
 		this.start();
 		this.closeOpen();
 		for (const call of calls) {
@@ -157,9 +158,9 @@ class AntigravityTurn {
 		this.done("toolUse");
 	}
 
-	complete(stopReason: string, usage: PromptUsage | undefined): void {
+	complete(stopReason: string, usage: PromptUsage | undefined, contextUsed: number | undefined): void {
 		if (this.finished) return;
-		this.setUsage(usage);
+		this.setUsage(usage, contextUsed);
 		const mapped = STOP_REASONS[stopReason];
 		if (mapped === "aborted") { this.fail(ABORT_MESSAGE, "aborted"); return; }
 		if (!mapped) { this.fail(`Antigravity ended the turn with an unknown stop reason: ${stopReason}`, "error"); return; }
@@ -180,17 +181,29 @@ class AntigravityTurn {
 		this.stream.end();
 	}
 
-	private setUsage(usage: PromptUsage | undefined): void {
-		if (!usage) return;
+	/** LearnHarness measures context from the latest message's usage buckets.
+	 * agy's prompt usage sums every model call of a tool loop, so the context
+	 * figure comes from `usage_update.used` (the latest call's input + output). */
+	private setContextUsage(contextUsed: number | undefined, output = 0): void {
+		if (contextUsed === undefined || contextUsed <= 0) return;
+		const input = Math.max(0, contextUsed - output);
+		Object.assign(this.output.usage, { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output });
+	}
+
+	private setUsage(usage: PromptUsage | undefined, contextUsed: number | undefined): void {
 		const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-		const cacheRead = count(usage.cachedReadTokens);
-		const cacheWrite = count(usage.cachedWriteTokens);
-		// agy reports uncached input; cached reads arrive separately
-		// (totalTokens = inputTokens + outputTokens + cachedReadTokens).
-		const input = count(usage.inputTokens);
-		const output = count(usage.outputTokens);
-		Object.assign(this.output.usage, { input, output, cacheRead, cacheWrite, totalTokens: input + output + cacheRead + cacheWrite });
-		if (usage.thoughtTokens !== undefined) this.output.usage.reasoning = count(usage.thoughtTokens);
+		if (contextUsed !== undefined && contextUsed > 0) {
+			// Output tokens of the whole prompt, bounded by the measured context.
+			this.setContextUsage(contextUsed, Math.min(count(usage?.outputTokens), contextUsed));
+		} else if (usage) {
+			// No context report: agy's uncached input, cached reads, and output.
+			const cacheRead = count(usage.cachedReadTokens);
+			const cacheWrite = count(usage.cachedWriteTokens);
+			const input = count(usage.inputTokens);
+			const output = count(usage.outputTokens);
+			Object.assign(this.output.usage, { input, output, cacheRead, cacheWrite, totalTokens: input + output + cacheRead + cacheWrite });
+		}
+		if (usage?.thoughtTokens !== undefined) this.output.usage.reasoning = count(usage.thoughtTokens);
 	}
 
 	private start(): void {
@@ -246,6 +259,8 @@ class AntigravityProcess implements LiveProcess {
 	private signal: AbortSignal | undefined;
 	private acpSessionId: string | undefined;
 	private contextWindow: number | undefined;
+	/** Context after agy's latest model call (`usage_update.used`). */
+	private contextUsed: number | undefined;
 	bridge!: ToolBridge;
 
 	constructor(
@@ -330,6 +345,13 @@ class AntigravityProcess implements LiveProcess {
 		this.connection.kill();
 	}
 
+	/** agy abandoned a call (e.g. its MCP timeout) Pi already owns: this
+	 * session can no longer receive the result. Kill it; the continuation
+	 * then replays fresh history that carries the tool result. */
+	cancelCall(call: PendingToolCall): void {
+		if (this.admitted.some((admitted) => admitted.id === call.id)) this.kill();
+	}
+
 	scheduleAdmission(): void {
 		clearTimeout(this.settleTimer);
 		this.settleTimer = setTimeout(() => this.flushAdmissions(), ADMISSION_SETTLE_MS);
@@ -344,7 +366,7 @@ class AntigravityProcess implements LiveProcess {
 		const calls: ToolCall[] = pending.map((call) => ({ type: "toolCall", id: call.id, name: call.name, arguments: call.arguments }));
 		this.admitted = pending;
 		this.toolCallIds = pending.map((call) => call.id);
-		this.turn.admit(calls);
+		this.turn.admit(calls, this.contextUsed);
 		this.conversation.push(...structuredClone(conversationForReuse([this.turn.getMessage()])));
 		if (this.sessionId) addLiveProcess(this);
 		else this.kill(); // No trusted scope: return the batch, then use fresh replay.
@@ -371,7 +393,7 @@ class AntigravityProcess implements LiveProcess {
 	}
 
 	private update(params: unknown): void {
-		const update = (params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: unknown }; size?: unknown } } | null)?.update;
+		const update = (params as { update?: { sessionUpdate?: string; content?: { type?: string; text?: unknown }; size?: unknown; used?: unknown } } | null)?.update;
 		switch (update?.sessionUpdate) {
 			case "agent_message_chunk":
 			case "agent_thought_chunk": {
@@ -384,6 +406,7 @@ class AntigravityProcess implements LiveProcess {
 					this.contextWindow = update.size;
 					this.turn.setContextWindow(update.size);
 				}
+				if (typeof update.used === "number" && Number.isSafeInteger(update.used) && update.used > 0) this.contextUsed = update.used;
 				return;
 		}
 	}
@@ -391,7 +414,11 @@ class AntigravityProcess implements LiveProcess {
 	/** While Pi runs admitted tools the turn is finished; later events wait for its continuation. */
 	private event(event: BufferedEvent): void {
 		if (this.turn.finished) {
-			if (!this.stopping && this.admitted.length > 0) this.buffered.push(event);
+			if (this.stopping || this.admitted.length === 0) return;
+			// Ending the prompt while Pi still owes a result means agy gave up
+			// on it; replaying that ending would silently drop the result.
+			if (event.type === "result" || event.type === "error") { this.kill(); return; }
+			this.buffered.push(event);
 			return;
 		}
 		switch (event.type) {
@@ -403,7 +430,7 @@ class AntigravityProcess implements LiveProcess {
 				if (this.bridge.getPendingToolCalls().length > 0) {
 					this.turn.fail("Antigravity ended its turn while harness tool calls were waiting for results", "error");
 				} else {
-					this.turn.complete(event.stopReason, event.usage);
+					this.turn.complete(event.stopReason, event.usage, this.contextUsed);
 				}
 				this.kill();
 				return;
@@ -491,6 +518,7 @@ async function startProcess(
 		process.bridge = await createToolBridge(input.tools, {
 			onCall: () => process.scheduleAdmission(),
 			onError: (error) => process.fail(error.message),
+			onCancel: (call) => process.cancelCall(call),
 		}, {
 			identify: (request) => process.identify(request),
 			identityError: IDENTITY_ERROR,

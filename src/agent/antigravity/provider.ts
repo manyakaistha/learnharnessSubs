@@ -26,7 +26,7 @@ export function antigravityPiModel(model: AntigravityModel, contextWindow: numbe
 			off: null,
 			...Object.fromEntries(LEVELS.map((level) => [level, supported.has(level) ? level : null])),
 		},
-		contextWindow: contextWindow ?? FALLBACK_CONTEXT_WINDOW,
+		contextWindow: model.contextWindow ?? contextWindow ?? FALLBACK_CONTEXT_WINDOW,
 		maxTokens: 65_536,
 	};
 }
