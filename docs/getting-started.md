@@ -9,6 +9,7 @@ Open **Settings → Providers** and configure a connection:
 - **Provider API keys:** use your own account and pay that provider's rates.
 - **Subscription connections:** ChatGPT, GitHub Copilot, and Grok use their respective sign-in flows and account limits. They do not silently fall back to API-key billing.
 - **[Claude Code](claude-code.md):** use a separately installed and authenticated CLI. Its own configuration controls routing and billing; this is not a subscription-only guarantee.
+- **Google Antigravity** uses a CLI that LearnHarness installs and the model access included in your Antigravity plan. [Set up Antigravity](antigravity.md)
 - **[Custom endpoint](custom-providers.md):** connect one OpenAI-compatible server, including a local model server. LearnHarness does not install or download models.
 
 Choose **Strong**, **Cheap**, and **Vision** models in Settings. There are no factory model selections. New sessions start with Strong; background roles use their assigned slots or role overrides. A model selected inside an existing session belongs to that session and does not change background-role choices.

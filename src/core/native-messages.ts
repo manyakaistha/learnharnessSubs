@@ -40,6 +40,7 @@ import { ImmutableReadCache } from "./immutable-data.ts";
 import { QUESTION_TOOLS, type PendingQuestion } from "./pending.ts";
 import { pluginProblemForCall, readPluginProblemSubmission, type PluginProblemSnapshot } from "./plugin-problems.ts";
 import { CLAUDE_CODE_PROVIDER } from "./contracts/claude-code.ts";
+import { ANTIGRAVITY_PROVIDER } from "./contracts/antigravity.ts";
 import {
 	CONCLUDE_ACK_TEXT,
 	HANDOFF_TEXT,
@@ -120,7 +121,7 @@ export function cliContextWindowOf(messages: readonly LhMessage[]): { model: str
 		if (message.role === "custom" && message.customType === "compaction") return null;
 		if (message.role !== "assistant") continue;
 		const tokens = message.cliContextWindow;
-		return message.provider === CLAUDE_CODE_PROVIDER && typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens > 0
+		return (message.provider === CLAUDE_CODE_PROVIDER || message.provider === ANTIGRAVITY_PROVIDER) && typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens > 0
 			? { model: `${message.provider}:${message.model}`, tokens } : null;
 	}
 	return null;

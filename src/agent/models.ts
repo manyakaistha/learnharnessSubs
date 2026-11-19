@@ -20,6 +20,9 @@ import { chatGPTStream } from "./chatgpt-stream.ts";
 import type { ChatGPTDispatchLifecycle } from "./chatgpt-request-cycle.ts";
 import { createClaudeCodeProvider } from "./claude-code/provider.ts";
 import { streamClaudeCode } from "./claude-code/stream.ts";
+import { createAntigravityProvider } from "./antigravity/provider.ts";
+import { antigravityCatalog, antigravityCatalogRevision } from "./antigravity/runtime-source.ts";
+import { streamAntigravity } from "./antigravity/stream.ts";
 import { nativeSubscriptionId, nativeSubscriptionModel } from "./subscription-bridge.ts";
 import { nativeSubscriptionStream } from "./subscription-stream.ts";
 
@@ -59,6 +62,7 @@ interface ProviderSource {
 	isCustom(id: string): boolean;
 }
 let providerSource: ProviderSource | undefined;
+let antigravityRevision = -1;
 
 /** Configuration IO is injected by the server; the agent never imports stores. */
 export function configureProviderSource(source: ProviderSource): void {
@@ -92,6 +96,12 @@ export function piModels() {
 				: provider);
 		}
 		collection.setProvider(createClaudeCodeProvider(streamClaudeCode));
+	}
+	// The account catalog arrives from the server after sign-in/refresh.
+	const revision = antigravityCatalogRevision();
+	if (revision !== antigravityRevision) {
+		antigravityRevision = revision;
+		collection.setProvider(createAntigravityProvider(antigravityCatalog(), streamAntigravity));
 	}
 	providerSource?.sync(collection);
 	return collection;

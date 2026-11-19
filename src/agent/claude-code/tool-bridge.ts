@@ -24,10 +24,26 @@ export type PendingToolCall = { id: string; name: string; arguments: JsonObject 
 
 type BridgeCallbacks = { onCall(): void; onError(error: Error): void; onCancel?(call: PendingToolCall): void };
 
+/** How an MCP request proves which streamed tool call it executes. Claude Code
+ * stamps `claudecode/toolUseId`; other CLIs (agy) are matched by the caller. */
+export type BridgeOptions = {
+	identify?(request: { name: string; arguments: JsonObject; meta: Record<string, unknown> | undefined }): string | undefined;
+	identityError?: string;
+	/** Extra `_meta` for every listed tool, e.g. agy's always-load flag. */
+	toolMeta?: Record<string, unknown>;
+};
+
+const claudeIdentity: NonNullable<BridgeOptions["identify"]> = ({ meta }) => {
+	const id = meta?.["claudecode/toolUseId"];
+	return typeof id === "string" ? id : undefined;
+};
+
 export const MCP_IDENTITY_ERROR = "claude CLI compatibility error: MCP calls must include a unique claudecode/toolUseId";
 
 export type ToolBridge = {
 	mcpConfig: string;
+	url: string;
+	authorization: string;
 	allowedTools: string[];
 	waitForToolCalls(count: number): Promise<PendingToolCall[]>;
 	resolveToolCall(call: PendingToolCall, result: ToolResultMessage): void;
@@ -59,8 +75,8 @@ function toCallToolResult(result: ToolResultMessage): CallToolResult {
 	return { content: result.content.map(toMcpContent), isError: result.isError };
 }
 
-function toMcpTool(tool: Tool): McpTool {
-	return { name: tool.name, description: tool.description, inputSchema: tool.parameters as McpTool["inputSchema"] };
+function toMcpTool(tool: Tool, meta?: Record<string, unknown>): McpTool {
+	return { name: tool.name, description: tool.description, inputSchema: tool.parameters as McpTool["inputSchema"], ...(meta ? { _meta: meta } : {}) };
 }
 
 class ToolCallQueue {
@@ -125,16 +141,17 @@ class ToolCallQueue {
 
 // Low-level Server on purpose: McpServer.registerTool only takes zod schemas, and pi tools carry
 // JSON Schema that must reach the CLI unchanged.
-function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: BridgeCallbacks): Server {
+function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: BridgeCallbacks, options: BridgeOptions = {}): Server {
 	const server = new Server({ name: BRIDGE_SERVER_NAME, version: "1.0.0" }, { capabilities: { tools: {} } });
 
-	server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: tools.map(toMcpTool) }));
+	server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: tools.map((tool) => toMcpTool(tool, options.toolMeta)) }));
 
 	const seenIds = new Set<string>();
 	server.setRequestHandler(CallToolRequestSchema, (request, extra) => {
-		const id = request.params._meta?.["claudecode/toolUseId"];
+		const args = (request.params.arguments ?? {}) as JsonObject;
+		const id = (options.identify ?? claudeIdentity)({ name: request.params.name, arguments: args, meta: request.params._meta as Record<string, unknown> | undefined });
 		if (typeof id !== "string" || !id.trim() || seenIds.has(id)) {
-			const error = new McpError(ErrorCode.InvalidParams, MCP_IDENTITY_ERROR);
+			const error = new McpError(ErrorCode.InvalidParams, options.identityError ?? MCP_IDENTITY_ERROR);
 			callbacks?.onError(error);
 			throw error;
 		}
@@ -144,7 +161,7 @@ function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: Bridge
 			throw error;
 		}
 		seenIds.add(id);
-		const result = queue.add({ id, name: request.params.name, arguments: (request.params.arguments ?? {}) as JsonObject }, extra.signal, callbacks?.onCancel);
+		const result = queue.add({ id, name: request.params.name, arguments: args }, extra.signal, callbacks?.onCancel);
 		callbacks?.onCall();
 		return result;
 	});
@@ -202,11 +219,11 @@ function toMcpConfig(port: number, authorization: string): string {
 	return JSON.stringify({ mcpServers: { [BRIDGE_SERVER_NAME]: server } });
 }
 
-export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallbacks): Promise<ToolBridge> {
+export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallbacks, options?: BridgeOptions): Promise<ToolBridge> {
 	const authorization = `Bearer ${randomBytes(TOKEN_BYTES).toString("hex")}`;
 
 	const queue = new ToolCallQueue();
-	const mcpServer = createMcpServer(tools, queue, callbacks);
+	const mcpServer = createMcpServer(tools, queue, callbacks, options);
 	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
 	await mcpServer.connect(transport);
 
@@ -221,6 +238,8 @@ export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallback
 
 	return {
 		mcpConfig: toMcpConfig(port, authorization),
+		url: `http://${LOOPBACK_HOST}:${port}/mcp`,
+		authorization,
 		allowedTools: tools.map((tool) => `${MCP_TOOL_PREFIX}${tool.name}`),
 		waitForToolCalls: (count) => queue.waitFor(count),
 		resolveToolCall: (call, result) => queue.resolve(call, result),

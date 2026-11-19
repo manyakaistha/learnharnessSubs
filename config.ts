@@ -141,6 +141,14 @@ export const PROMPTS_OVERRIDE_DIR = path.join(/* turbopackIgnore: true */ DATA_R
 export const THEMES_DIR = path.join(/* turbopackIgnore: true */ DATA_ROOT, "themes");
 
 /**
+ * Antigravity (Google's `agy` CLI): the managed runtime versions
+ * (runtime/<version>/), the private agy profile (profile/, its GEMINI_HOME,
+ * isolating hooks/MCP/skills/rules from the user's global agy setup), and
+ * the cached account catalog/state. Not learning data.
+ */
+export const ANTIGRAVITY_DIR = path.join(/* turbopackIgnore: true */ DATA_ROOT, "antigravity");
+
+/**
  * THE AUTH/KEY STORE (auth-keys wave, 2026-09-19): BYOK provider keys in a
  * flat {VAR: value} JSON map — the SAME file the Electron app has always
  * hand-edited (owner decision: option A, zero migration). Desktop main.cjs
