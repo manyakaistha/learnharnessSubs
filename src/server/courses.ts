@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { COURSE_FILES_DIR } from "../../config.ts";
+import { COURSE_FILES_DIR, assertDataStoreWritable } from "../../config.ts";
 import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE } from "../../lib/notes-import-limits.ts";
 import type {
 	CourseAction,
@@ -461,6 +461,8 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 	if (!stores.courseStore.read().courses.some((c) => c.id === courseId)) {
 		throw new CourseInputError("Course no longer exists.");
 	}
+	// Store identity first; the managed-folder link checks below keep their 400s.
+	assertDataStoreWritable();
 	await fsPromises.mkdir(/* turbopackIgnore: true */ managedDir, { recursive: true });
 
 	const copied: string[] = [];

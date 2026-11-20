@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { COURSES_FILE } from "../../config.ts";
+import { COURSES_FILE, mkdirDataDirectory } from "../../config.ts";
 import { emptyCourseState, parseCourseState } from "../core/courses.ts";
 import type { CourseStore } from "../core/ports.ts";
 import { emit } from "../core/events.ts";
@@ -22,7 +22,7 @@ export const courseStore: CourseStore = {
 	write(state) {
 		assertGraphFormat();
 		const valid = parseCourseState(state);
-		fs.mkdirSync(path.dirname(COURSES_FILE), { recursive: true });
+		mkdirDataDirectory(path.dirname(COURSES_FILE));
 		ensureGraphFormat();
 		writeFileAtomicSync(COURSES_FILE, JSON.stringify(valid, null, "\t") + "\n");
 		removeLeftoverTemps(COURSES_FILE);
