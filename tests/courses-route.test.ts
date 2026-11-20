@@ -789,3 +789,56 @@ it("delete-sources keeps managed copies owned by another course and removes own,
 	assert.equal(stores.graphStore.readSources().some((s) => s.id === srcMovedB), true);
 	assert.equal(stores.courseStore.read().membership[srcMovedB], cB);
 });
+
+it("folder overlap compares canonical paths in both directions including aliases and managed folders", async () => {
+	const c1 = (await (await postCourse({ action: "create", name: "CourseOne" })).json()).courses[0].id as string;
+	const c2 = (await (await postCourse({ action: "create", name: "CourseTwo" })).json()).courses.find((c: { name: string }) => c.name === "CourseTwo").id as string;
+
+	const realBase = path.join(root, "real-base");
+	const nestedDir = path.join(realBase, "week1");
+	fs.mkdirSync(nestedDir, { recursive: true });
+	const aliasToBase = path.join(root, "alias-base");
+	const aliasToNested = path.join(root, "alias-week1");
+	fs.symlinkSync(realBase, aliasToBase, "dir");
+	fs.symlinkSync(nestedDir, aliasToNested, "dir");
+
+	// Attach realBase to CourseOne, then reject direct alias and nested alias on same/other course
+	assert.equal((await postCourse({ action: "add-folder", id: c1, path: realBase })).status, 200);
+	const sameAlias = await postCourse({ action: "add-folder", id: c1, path: aliasToBase });
+	assert.equal(sameAlias.status, 400);
+	assert.match((await sameAlias.json()).error, /overlaps/);
+
+	const otherAlias = await postCourse({ action: "add-folder", id: c2, path: aliasToBase });
+	assert.equal(otherAlias.status, 400);
+	assert.match((await otherAlias.json()).error, /CourseOne/);
+
+	const nestedAlias = await postCourse({ action: "add-folder", id: c2, path: aliasToNested });
+	assert.equal(nestedAlias.status, 400);
+	assert.match((await nestedAlias.json()).error, /CourseOne/);
+
+	// Reverse direction: attach aliasToNested to CourseTwo (after removing realBase), then reject realBase on CourseOne
+	await postCourse({ action: "delete", id: c1, mode: "ungroup" });
+	const c1b = (await (await postCourse({ action: "create", name: "CourseOneB" })).json()).courses.find((c: { name: string }) => c.name === "CourseOneB").id as string;
+	assert.equal((await postCourse({ action: "add-folder", id: c2, path: aliasToNested })).status, 200);
+	const parentOfAlias = await postCourse({ action: "add-folder", id: c1b, path: realBase });
+	assert.equal(parentOfAlias.status, 400);
+	assert.match((await parentOfAlias.json()).error, /CourseTwo/);
+
+	// Managed folder overlap: CourseTwo attaches an alias to LH_DATA_DIR (ancestor of COURSE_FILES_DIR) -> upload to CourseOneB returns 400
+	await postCourse({ action: "delete", id: c2, mode: "ungroup" });
+	const c2b = (await (await postCourse({ action: "create", name: "AncestorOwner" })).json()).courses.find((c: { name: string }) => c.name === "AncestorOwner").id as string;
+	const dataAncestorAlias = path.join(os.tmpdir(), `lh-data-alias-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	fs.symlinkSync(root, dataAncestorAlias, "dir");
+	try {
+		assert.equal((await postCourse({ action: "add-folder", id: c2b, path: dataAncestorAlias })).status, 200);
+		const form = new FormData();
+		form.append("courseId", c1b);
+		form.append("files", new File(["# hi"], "notes.md"));
+		const uploadRes = await courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+		assert.equal(uploadRes.status, 400);
+		assert.match((await uploadRes.json()).error, /AncestorOwner/);
+		assert.equal(fs.existsSync(path.join(COURSE_FILES_DIR, c1b)), false, "managed folder must not be created on overlap refusal");
+	} finally {
+		fs.rmSync(dataAncestorAlias, { recursive: true, force: true });
+	}
+});

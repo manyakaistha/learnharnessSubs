@@ -15,7 +15,7 @@ import type {
 	CoursesView,
 } from "../core/contracts/courses.ts";
 import type { SourceDirectory } from "../core/source-organization.ts";
-import { isWithin } from "../agent/tools/file-access.ts";
+import { isWithin, realSourcePath } from "../agent/tools/file-access.ts";
 import { isProtectedSourcePath, isSensitivePath } from "../agent/tools/fs-shared.ts";
 import { applyCourseAction, courseClosure, courseOf, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
 import { emit } from "../core/events.ts";
@@ -32,6 +32,31 @@ function expandHomePath(rawPath: string, home: string = os.homedir()): string {
 	if (rawPath === "~") return home;
 	if (rawPath.startsWith("~/") || rawPath.startsWith(`~${path.sep}`)) return path.join(home, rawPath.slice(2));
 	return rawPath;
+}
+
+function canonicalFolderPath(rawPath: string): string {
+	const lexical = path.resolve(expandHomePath(rawPath));
+	try {
+		return realSourcePath(lexical);
+	} catch {
+		return lexical;
+	}
+}
+
+function assertNoFolderOverlap(state: CourseState, targetId: string, candidatePath: string): void {
+	const candidateCanonical = canonicalFolderPath(candidatePath);
+	// File identity and membership are global per path, so one canonical
+	// folder tree may belong to only one course.
+	for (const other of state.courses) {
+		for (const folder of other.folders) {
+			const existingCanonical = canonicalFolderPath(folder.path);
+			if (isWithin(candidateCanonical, existingCanonical) || isWithin(existingCanonical, candidateCanonical)) {
+				throw new CourseInputError(other.id === targetId
+					? "This folder overlaps a folder already attached to this course."
+					: `This folder overlaps a folder already attached to the course "${other.name}".`);
+			}
+		}
+	}
 }
 
 function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): string {
@@ -139,17 +164,7 @@ export function mutateCourses(raw: unknown): CoursesView {
 		const targetId = action.id;
 		if (!state.courses.some((c) => c.id === targetId)) throw new CourseInputError("Course no longer exists.");
 		const folderPath = resolveCourseFolderPath(action.path);
-		// File identity and membership are global per path, so one folder
-		// (or a nested one) may belong to only one course.
-		for (const other of state.courses) {
-			for (const folder of other.folders) {
-				if (isWithin(folderPath, folder.path) || isWithin(folder.path, folderPath)) {
-					throw new CourseInputError(other.id === targetId
-						? "This folder overlaps a folder already attached to this course."
-						: `This folder overlaps a folder already attached to the course "${other.name}".`);
-				}
-			}
-		}
+		assertNoFolderOverlap(state, targetId, folderPath);
 		action = { ...action, path: folderPath };
 	}
 
@@ -353,13 +368,18 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 		throw new CourseInputError("Course ID must be a non-empty string.");
 	}
 	const initialState = stores.courseStore.read();
-	if (!initialState.courses.some((c) => c.id === courseId)) {
+	const initialCourse = initialState.courses.find((c) => c.id === courseId);
+	if (!initialCourse) {
 		throw new CourseInputError("Course not found.");
 	}
 	const managedRoot = path.resolve(COURSE_FILES_DIR);
 	const managedDir = path.resolve(path.join(/* turbopackIgnore: true */ managedRoot, courseId));
 	if (managedDir === managedRoot || !isWithin(managedDir, managedRoot)) {
 		throw new CourseInputError("Invalid course ID.");
+	}
+	const managedCanonical = canonicalFolderPath(managedDir);
+	if (!initialCourse.folders.some((f) => canonicalFolderPath(f.path) === managedCanonical)) {
+		assertNoFolderOverlap(initialState, courseId, managedDir);
 	}
 
 	const rawChatId = input.chatId?.trim() ?? "";
@@ -417,7 +437,8 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 		if (!course) throw new CourseInputError("Course no longer exists.");
 
 		let next = state;
-		if (!course.folders.some((f) => f.path === managedDir)) {
+		if (!course.folders.some((f) => f.path === managedDir || canonicalFolderPath(f.path) === managedCanonical)) {
+			assertNoFolderOverlap(state, courseId, managedDir);
 			next = applyCourseAction(next, { action: "add-folder", id: courseId, path: managedDir }, {
 				id: `cfld_${randomUUID()}`,
 				at: new Date().toISOString(),
