@@ -108,6 +108,15 @@ it("add-folder validates absolute existing directories, normalizes paths, expand
 	// Duplicate folder rejected
 	assert.equal((await postCourse({ action: "add-folder", id: courseId, path: folder })).status, 400);
 
+	// Nested or parent folders overlap this or another course's folder
+	assert.equal((await postCourse({ action: "add-folder", id: courseId, path: path.join(root, "notes") })).status, 400);
+	const other = (await (await postCourse({ action: "create", name: "Other" })).json()).courses.find((c: { name: string }) => c.name === "Other").id;
+	fs.mkdirSync(path.join(folder, "sub"), { recursive: true });
+	const overlap = await postCourse({ action: "add-folder", id: other, path: path.join(folder, "sub") });
+	assert.equal(overlap.status, 400);
+	assert.match((await overlap.json()).error, /Robotics/);
+	await postCourse({ action: "delete", id: other, mode: "ungroup" });
+
 	// Remove folder
 	const removed = await postCourse({ action: "remove-folder", id: courseId, folderId: folderRec.id });
 	assert.equal(removed.status, 200);

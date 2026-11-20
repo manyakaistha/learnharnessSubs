@@ -68,3 +68,15 @@ it("actions parse strictly", () => {
 	assert.throws(() => parseCourseAction({ action: "delete", id: "a", mode: "nuke" }), /mode/);
 	assert.throws(() => parseCourseAction({ action: "rename", id: "a", name: " " }), /Name/);
 });
+
+it("projections narrow provenance so no out-of-scope session leaks into clusters", () => {
+	const s = build();
+	const scope = resolveCourseScope(s, "cv")!;
+	const graph = { nodes: [node("n1", "c_dl", "c_cv")], chains: [chain("k", ["n1"], "n1", "c_dl", "c_cv")] };
+	const g = projectCourseGraph(graph, scope);
+	assert.deepEqual(g.nodes[0]!.provenance.map((p) => p.chatId), ["c_cv"]);
+	assert.deepEqual(g.chains[0]!.provenance.map((p) => p.chatId), ["c_cv"]);
+	const free = projectUnassignedGraph(s, { nodes: [node("n2", "c_cv", "free")], chains: [] });
+	assert.deepEqual(free.nodes[0]!.provenance.map((p) => p.chatId), ["free"]);
+	assert.throws(() => parseCourseAction({ action: "assign", sourceId: "__proto__", courseId: null }), /Invalid source/);
+});

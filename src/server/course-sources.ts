@@ -10,6 +10,8 @@ import { convertPdf } from "../agent/subagents/pdf-ops.ts";
 import type { CourseFileStatus, CourseFolder, CourseState } from "../core/contracts/courses.ts";
 import { emit } from "../core/events.ts";
 import { placeImportedSource } from "../core/source-organization.ts";
+import { isWithin } from "../agent/tools/file-access.ts";
+import { isSensitivePath } from "../agent/tools/fs-shared.ts";
 import { extraction } from "./chat-handler.ts";
 import { stores } from "./stores.ts";
 
@@ -22,6 +24,8 @@ export type CourseExtractor = (input: { sourceId: string; filePath: string; text
 
 interface CourseSourcesRuntime {
 	activeScans: Map<string, Promise<void>>;
+	/** A scan requested while one runs: run one more pass when it ends. */
+	pendingScans: Set<string>;
 	statuses: Map<string, CourseFileStatus[]>;
 	extractorOverride: CourseExtractor | null;
 }
@@ -30,6 +34,7 @@ function runtime(): CourseSourcesRuntime {
 	const g = globalThis as typeof globalThis & { __lhCourseSources?: CourseSourcesRuntime };
 	return (g.__lhCourseSources ??= {
 		activeScans: new Map(),
+		pendingScans: new Set(),
 		statuses: new Map(),
 		extractorOverride: null,
 	});
@@ -89,11 +94,19 @@ interface DiscoveredFile {
 
 async function discoverCourseFiles(folders: readonly CourseFolder[]): Promise<DiscoveredFile[]> {
 	const discovered: DiscoveredFile[] = [];
+	// Dedupe by CANONICAL path: two links to one file extract once.
 	const seenFiles = new Set<string>();
 
 	for (const folder of folders) {
-		const root = path.resolve(folder.path);
+		let realRoot: string;
+		try { realRoot = await fs.realpath(/* turbopackIgnore: true */ path.resolve(folder.path)); }
+		catch { continue; }
+		if (isSensitivePath(realRoot)) continue;
 		const visitedDirs = new Set<string>();
+		// Same containment the agent's file tools enforce: a symlink may not
+		// lead outside the attached folder or into credential locations.
+		const allowed = (lexical: string, real: string) =>
+			isWithin(real, realRoot) && !isSensitivePath(real) && !isSensitivePath(lexical);
 
 		const walk = async (dir: string): Promise<void> => {
 			let realDir: string;
@@ -104,7 +117,7 @@ async function discoverCourseFiles(folders: readonly CourseFolder[]): Promise<Di
 			} catch {
 				return;
 			}
-			if (visitedDirs.has(realDir)) return;
+			if (!allowed(dir, realDir) || visitedDirs.has(realDir)) return;
 			visitedDirs.add(realDir);
 
 			let entries: Dirent[];
@@ -116,40 +129,28 @@ async function discoverCourseFiles(folders: readonly CourseFolder[]): Promise<Di
 			entries.sort((a, b) => a.name.localeCompare(b.name));
 
 			for (const entry of entries) {
+				if (entry.name.startsWith(".")) continue;
 				const fullPath = path.resolve(dir, entry.name);
-				if (entry.isDirectory()) {
-					if (entry.name.startsWith(".")) continue;
-					await walk(fullPath);
-				} else if (entry.isSymbolicLink()) {
-					if (entry.name.startsWith(".")) continue;
-					let st: Stats;
-					try {
-						st = await fs.stat(/* turbopackIgnore: true */ fullPath);
-					} catch {
-						continue;
-					}
-					if (st.isDirectory()) {
-						await walk(fullPath);
-					} else if (st.isFile() && IMPORT_EXTENSIONS.test(entry.name) && !seenFiles.has(fullPath)) {
-						seenFiles.add(fullPath);
-						discovered.push({ absPath: fullPath, folder, size: st.size });
-					}
-				} else if (entry.isFile() && IMPORT_EXTENSIONS.test(entry.name) && !seenFiles.has(fullPath)) {
-					let st: Stats;
-					try {
-						st = await fs.stat(/* turbopackIgnore: true */ fullPath);
-					} catch {
-						continue;
-					}
-					seenFiles.add(fullPath);
+				if (!entry.isDirectory() && !entry.isFile() && !entry.isSymbolicLink()) continue;
+				let real: string;
+				let st: Stats;
+				try {
+					real = await fs.realpath(/* turbopackIgnore: true */ fullPath);
+					st = await fs.stat(/* turbopackIgnore: true */ real);
+				} catch {
+					continue;
+				}
+				if (!allowed(fullPath, real)) continue;
+				if (st.isDirectory()) await walk(fullPath);
+				else if (st.isFile() && IMPORT_EXTENSIONS.test(entry.name) && !seenFiles.has(real)) {
+					seenFiles.add(real);
 					discovered.push({ absPath: fullPath, folder, size: st.size });
 				}
 			}
 		};
 
-		await walk(root);
+		await walk(path.resolve(folder.path));
 	}
-
 	return discovered;
 }
 
@@ -384,6 +385,7 @@ async function runCourseScan(courseId: string): Promise<void> {
 	} finally {
 		rt.activeScans.delete(courseId);
 		emit("courses-changed", {});
+		if (rt.pendingScans.delete(courseId)) startCourseScan(courseId);
 	}
 }
 
@@ -391,7 +393,7 @@ async function runCourseScan(courseId: string): Promise<void> {
  * Called after "add-folder" and on { action: "rescan" }. */
 export function startCourseScan(courseId: string): void {
 	const rt = runtime();
-	if (rt.activeScans.has(courseId)) return;
+	if (rt.activeScans.has(courseId)) { rt.pendingScans.add(courseId); return; }
 	const state = stores.courseStore.read();
 	const course = state.courses.find((c) => c.id === courseId);
 	if (!course) return;
@@ -407,6 +409,12 @@ export function startCourseScan(courseId: string): void {
 	emit("courses-changed", {});
 }
 
+/** Drop cached status for a deleted course, or for deleted sources. */
+export function forgetCourseStatuses(courseId: string): void {
+	runtime().statuses.delete(courseId);
+	runtime().pendingScans.delete(courseId);
+}
+
 /** Per-file status for the course panel. */
 export function courseFileStatuses(courseId: string): CourseFileStatus[] {
 	const state = stores.courseStore.read();
@@ -415,7 +423,11 @@ export function courseFileStatuses(courseId: string): CourseFileStatus[] {
 	const folderIds = new Set(course.folders.map((f) => f.id));
 	const cached = runtime().statuses.get(courseId);
 	if (cached) {
-		return cached.filter((s) => folderIds.has(s.folderId)).map((s) => ({ ...s }));
+		// A source deleted elsewhere drops out of folderFiles; never keep
+		// reporting it as extracted.
+		return cached
+			.filter((s) => folderIds.has(s.folderId) && (s.state !== "extracted" || state.folderFiles[s.path]?.courseId === courseId))
+			.map((s) => ({ ...s }));
 	}
 	const out: CourseFileStatus[] = [];
 	for (const [absPath, rec] of Object.entries(state.folderFiles)) {

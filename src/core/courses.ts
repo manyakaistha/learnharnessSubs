@@ -145,21 +145,30 @@ export function projectCourseGraph(graph: { nodes: readonly GraphNode[]; chains:
 		const points = node.provenance.filter((pt) => scope.sources.has(pt.chatId));
 		if (points.length === 0) continue;
 		const courses = scope.courseIds.filter((c) => points.some((pt) => scope.sourceCourse.get(pt.chatId) === c));
-		nodes.push({ ...node, inherited: !points.some((pt) => scope.ownSources.has(pt.chatId)), courses });
+		// Provenance is narrowed to the scope so birth-session clusters and
+		// session lists never name a session outside the course.
+		nodes.push({ ...node, provenance: points, inherited: !points.some((pt) => scope.ownSources.has(pt.chatId)), courses });
 	}
 	const ids = new Set(nodes.map((n) => n.id));
 	const chains = graph.chains
 		.filter((c) => c.provenance.some((pt) => scope.sources.has(pt.chatId)) && ids.has(c.conclusion) && c.premises.every((p) => ids.has(p)))
-		.map((c) => ({ ...c, inherited: !c.provenance.some((pt) => scope.ownSources.has(pt.chatId)) }));
+		.map((c) => {
+			const provenance = c.provenance.filter((pt) => scope.sources.has(pt.chatId));
+			return { ...c, provenance, inherited: !provenance.some((pt) => scope.ownSources.has(pt.chatId)) };
+		});
 	return { nodes, chains };
 }
 
 /** "No course" subgraph: nodes/chains with any provenance in an unassigned source. */
 export function projectUnassignedGraph(state: CourseState, graph: { nodes: readonly GraphNode[]; chains: readonly GraphChain[] }) {
 	const free = (id: string) => sourceInFilter(state, { kind: "none" }, id);
-	const nodes = graph.nodes.filter((n) => n.provenance.some((pt) => free(pt.chatId)));
+	const nodes = graph.nodes
+		.filter((n) => n.provenance.some((pt) => free(pt.chatId)))
+		.map((n) => ({ ...n, provenance: n.provenance.filter((pt) => free(pt.chatId)) }));
 	const ids = new Set(nodes.map((n) => n.id));
-	const chains = graph.chains.filter((c) => c.provenance.some((pt) => free(pt.chatId)) && ids.has(c.conclusion) && c.premises.every((p) => ids.has(p)));
+	const chains = graph.chains
+		.filter((c) => c.provenance.some((pt) => free(pt.chatId)) && ids.has(c.conclusion) && c.premises.every((p) => ids.has(p)))
+		.map((c) => ({ ...c, provenance: c.provenance.filter((pt) => free(pt.chatId)) }));
 	return { nodes, chains };
 }
 
@@ -211,6 +220,7 @@ export function parseCourseAction(raw: unknown): CourseAction {
 		case "rename": return { action: "rename", id: str("id", "Course ID"), name: str("name", "Name") };
 		case "set-includes": return { action: "set-includes", id: str("id", "Course ID"), includes: list("includes") };
 		case "assign": {
+			if (r.sourceId === "__proto__" || r.sourceId === "constructor" || r.sourceId === "prototype") throw new Error("Invalid source ID.");
 			if (r.courseId !== null && (typeof r.courseId !== "string" || !r.courseId)) throw new Error("Invalid course.");
 			return { action: "assign", sourceId: str("sourceId", "Source ID"), courseId: r.courseId as string | null };
 		}

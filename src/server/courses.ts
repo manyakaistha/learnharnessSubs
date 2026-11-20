@@ -4,10 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import type { CourseAction, CourseFilter, CourseState, CoursesView } from "../core/contracts/courses.ts";
 import type { SourceDirectory } from "../core/source-organization.ts";
+import { isWithin } from "../agent/tools/file-access.ts";
 import { applyCourseAction, courseClosure, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
 import { emit } from "../core/events.ts";
-import { courseFileStatuses, courseScanning, startCourseScan } from "./course-sources.ts";
-import { deleteSources } from "./source-deletion.ts";
+import { courseFileStatuses, courseScanning, forgetCourseStatuses, startCourseScan } from "./course-sources.ts";
+import { deleteSources, SourceDeletionError } from "./source-deletion.ts";
 import { sourceDirectory } from "./source-organization.ts";
 import { stores } from "./stores.ts";
 
@@ -94,12 +95,27 @@ export function mutateCourses(raw: unknown): CoursesView {
 	if (action.action === "add-folder") {
 		const targetId = action.id;
 		if (!state.courses.some((c) => c.id === targetId)) throw new CourseInputError("Course no longer exists.");
-		action = { ...action, path: resolveCourseFolderPath(action.path) };
+		const folderPath = resolveCourseFolderPath(action.path);
+		// File identity and membership are global per path, so one folder
+		// (or a nested one) may belong to only one course.
+		for (const other of state.courses) {
+			for (const folder of other.folders) {
+				if (isWithin(folderPath, folder.path) || isWithin(folder.path, folderPath)) {
+					throw new CourseInputError(other.id === targetId
+						? "This folder overlaps a folder already attached to this course."
+						: `This folder overlaps a folder already attached to the course "${other.name}".`);
+				}
+			}
+		}
+		action = { ...action, path: folderPath };
 	}
 
 	if (action.action === "delete") {
 		const targetId = action.id;
 		if (!state.courses.some((c) => c.id === targetId)) throw new CourseInputError("Course no longer exists.");
+		if (action.mode === "delete-sources" && courseScanning(targetId)) {
+			throw new SourceDeletionError("This course is still extracting its folders. Wait for it to finish, then delete.", 409, "extraction_running");
+		}
 		if (action.mode === "delete-sources") {
 			const ownSources = ownSourcesOf(state, targetId);
 			if (ownSources.length > 0) {
@@ -124,6 +140,7 @@ export function mutateCourses(raw: unknown): CoursesView {
 	}
 
 	stores.courseStore.write(next);
+	if (action.action === "delete") forgetCourseStatuses(action.id);
 	if (action.action === "add-folder") startCourseScan(action.id);
 	return buildCoursesView(next);
 }
