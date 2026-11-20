@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { serverExecute } from "../tool-execute.ts";
+import type { CourseGraphContext } from "../../core/courses.ts";
 import { getGraph, graphSessionIndex, graphSessionPropositions } from "../../core/graph.ts";
 import type { ChatStore, GraphStore } from "../../core/ports.ts";
 import { createPropositionCandidateSearch, propositionCandidateBatch, type CandidateBatch, type CandidateProposition, type CandidateRequest } from "../../core/proposition-candidates.ts";
@@ -29,6 +30,9 @@ import { createPropositionCandidateSearch, propositionCandidateBatch, type Candi
 export interface GraphToolContext {
 	chatStore: ChatStore;
 	graphStore: GraphStore;
+	/** Optional live course-scope resolver (injected server-side for
+	 *  prober/practice; absent = global graph, unchanged). */
+	courseScope?: () => CourseGraphContext | null;
 }
 
 const listSessionsInput = Type.Object({});
@@ -52,13 +56,23 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
 				"Reading this first shows what he has already covered and when, before you probe anything.",
 			parameters: listSessionsInput,
 			execute: serverExecute("list_sessions", listSessionsInput, async (): Promise<string> => {
-				const sessions = graphSessionIndex(deps);
-				if (sessions.length === 0) return "The knowledge graph is empty — no session has contributed propositions yet.";
-				const lines = sessions.map((s, i) =>
-					`${i + 1}. ${s.name} (${s.kind}, ${s.propositions} proposition${s.propositions === 1 ? "" : "s"}, ` +
-					`born ${s.createdAt ?? "unknown date"}${s.updatedAt ? `, last active ${s.updatedAt}` : ""}) — id: ${s.id}`,
-				);
-				return `${sessions.length} session(s) in the knowledge graph, most recent first:\n${lines.join("\n")}`;
+				const course = ctx.courseScope?.() ?? null;
+				const sessions = graphSessionIndex(deps, course?.scope);
+				if (sessions.length === 0) {
+					return course
+						? "The knowledge graph is empty — no session in this course has contributed propositions yet."
+						: "The knowledge graph is empty — no session has contributed propositions yet.";
+				}
+				const lines = sessions.map((s, i) => {
+					const owner = course
+						? course.scope.ownSources.has(s.id)
+							? ", this course"
+							: `, included from ${course.courseNames.get(course.scope.sourceCourse.get(s.id) ?? "") ?? "included course"}`
+						: "";
+					return `${i + 1}. ${s.name} (${s.kind}, ${s.propositions} proposition${s.propositions === 1 ? "" : "s"}, ` +
+						`born ${s.createdAt ?? "unknown date"}${s.updatedAt ? `, last active ${s.updatedAt}` : ""}${owner}) — id: ${s.id}`;
+				});
+				return `${sessions.length} session(s) in the knowledge graph${course ? " (this course first, most recent first)" : ", most recent first"}:\n${lines.join("\n")}`;
 			}),
 		},
 		list_propositions: {
@@ -69,7 +83,8 @@ export function proberGraphTools(ctx: GraphToolContext): Record<string, AgentToo
 				"Names only — no statement text, no session contents (owner ruling 2026-09-23: the map's ORGANIZATION is your business, its prose is not).",
 			parameters: listPropositionsInput,
 			execute: serverExecute("list_propositions", listPropositionsInput, async ({ session }): Promise<string> => {
-				const propositions = graphSessionPropositions(deps, session);
+				const course = ctx.courseScope?.() ?? null;
+				const propositions = graphSessionPropositions(deps, session, course?.scope);
 				if (propositions.length === 0) {
 					return `No propositions born in session "${session}". Call list_sessions for the current ids.`;
 				}

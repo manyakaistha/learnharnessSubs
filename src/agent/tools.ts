@@ -18,11 +18,11 @@ import type { JobStore } from "../core/ports.ts";
 import { jobTools, type DemoInput, type PdfInput, type ResearchInput, type VisualInput } from "./tools/jobs.ts";
 import { planTools, type PlanToolContext } from "./tools/plan.ts";
 import { probeDoneTool, type ProbeDoneContext } from "./tools/probe.ts";
-import { proberGraphTools } from "./tools/graph.ts";
-import { readTool } from "./tools/read.ts";
-import { lsTool } from "./tools/ls.ts";
-import { findTool } from "./tools/find.ts";
-import { grepTool } from "./tools/grep.ts";
+import { proberGraphTools, type GraphToolContext } from "./tools/graph.ts";
+import { createReadTool } from "./tools/read.ts";
+import { createLsTool } from "./tools/ls.ts";
+import { createFindTool } from "./tools/find.ts";
+import { createGrepTool } from "./tools/grep.ts";
 import { createShowImageTool } from "./tools/show-image.ts";
 import { healToolRecord } from "./tools/heal.ts";
 import type { GraphStore } from "../core/ports.ts";
@@ -277,6 +277,8 @@ export interface ProberToolContext extends ProbeDoneContext {
 	 *  master switch AND the agent.graphTools toggle (settings-resolution).
 	 *  Absent = the gate is closed, no map tools (tests drive this seam). */
 	graphStore?: GraphStore;
+	/** Optional live course-scope resolver for prober graph tools. */
+	courseScope?: GraphToolContext["courseScope"];
 }
 
 /** The prober's tool set: probe quiz (no nodeId) + ask + the learner-fs
@@ -323,10 +325,10 @@ export function createProberTools(
 				// The learner-filesystem set is always-on (user-decided 2026-09,
 				// sources v1): the prober inspects and LOCATES learner-referenced
 				// files while assessing the edge. Read-only by construction.
-				read: readTool,
-				ls: lsTool,
-				find: findTool,
-				grep: grepTool,
+				read: createReadTool(undefined, ctx.chatId),
+				ls: createLsTool(ctx.chatId),
+				find: createFindTool(ctx.chatId),
+				grep: createGrepTool(ctx.chatId),
 				// Job dispatch in the probe phase (owner ruling, 2026-09-20):
 				// research + pdf are ALWAYS available in every phase — the
 				// prober can verify facts or read learner PDFs while assessing.
@@ -338,7 +340,7 @@ export function createProberTools(
 				// The map reader (wave 7): present only when the settings gate
 				// opened.
 				...(ctx.graphStore
-					? proberGraphTools({ chatStore: ctx.chatStore, graphStore: ctx.graphStore })
+					? proberGraphTools({ chatStore: ctx.chatStore, graphStore: ctx.graphStore, ...(ctx.courseScope ? { courseScope: ctx.courseScope } : {}) })
 					: {}),
 				...done,
 			},
@@ -454,10 +456,10 @@ export function createTeacherTools(
 			// sources v1): the teacher locates and reads learner-referenced
 			// files on its own terms — nothing auto-injects. Read-only by
 			// construction (fs-shared.ts).
-			read: readTool,
-			ls: lsTool,
-			find: findTool,
-			grep: grepTool,
+			read: createReadTool(undefined, ctx.chatId),
+			ls: createLsTool(ctx.chatId),
+			find: createFindTool(ctx.chatId),
+			grep: createGrepTool(ctx.chatId),
 			// The learner-image display twin of read (issue #363): teacher
 			// only, always on — it shows the learner their own file.
 			show_image: createShowImageTool(ctx),

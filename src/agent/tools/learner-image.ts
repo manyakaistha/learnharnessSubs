@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { createHash } from "node:crypto";
+import { resolvePolicyForChat } from "./file-access.ts";
 import { resolveSourcePath } from "./fs-shared.ts";
 import { detectSupportedImageMimeType, detectSupportedImageMimeTypeFromFile, type ResizedImage } from "../image-processing/index.ts";
 import { checkImageDimensions, MAX_LEARNER_IMAGE_BYTES } from "./learner-image-dimensions.ts";
@@ -13,9 +14,9 @@ export interface LearnerImage extends ImageSnapshot {
 	snapshotId: string;
 }
 
-export async function checkLearnerImage(rawPath: string): Promise<string> {
+export async function checkLearnerImage(rawPath: string, chatId?: string): Promise<string> {
 	// Reuse the shared file-access policy, including canonical/symlink checks.
-	const absolute = resolveSourcePath(rawPath);
+	const absolute = resolveSourcePath(rawPath, resolvePolicyForChat(chatId));
 	try {
 		const stat = await fs.stat(absolute);
 		if (!stat.isFile()) throw new Error("it is not a regular file");
@@ -68,9 +69,9 @@ async function normalize(bytes: Uint8Array, signal?: AbortSignal): Promise<Resiz
 	} finally { await worker.terminate(); }
 }
 
-export async function loadLearnerImage(rawPath: string, signal?: AbortSignal): Promise<LearnerImage> {
+export async function loadLearnerImage(rawPath: string, signal?: AbortSignal, chatId?: string): Promise<LearnerImage> {
 	signal?.throwIfAborted();
-	const absolute = await checkLearnerImage(rawPath);
+	const absolute = await checkLearnerImage(rawPath, chatId);
 	const bytes = await readBounded(absolute, signal);
 	const mime = detectSupportedImageMimeType(bytes);
 	if (!mime) throw new Error(`Not a supported image: ${absolute}`);

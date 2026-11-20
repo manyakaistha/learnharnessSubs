@@ -465,7 +465,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			let image: LearnerImage | undefined;
 			if (imagePath !== undefined) {
 				jobStore.updateJob(jobId, { activity: "loading image" });
-				image = await loadLearnerImage(imagePath, loop.abortSignal);
+				image = await loadLearnerImage(imagePath, loop.abortSignal, job.chatId);
 			}
 			jobStore.updateJob(jobId, { activity: image ? "annotating image" : "drawing figure" });
 			const result = await runVisualMaker(

@@ -16,14 +16,16 @@ export interface ResolvedFileAccessPolicy {
 	unavailable: readonly string[];
 }
 
+export type FileAccessPolicyProvider = (chatId?: string) => FileAccessPolicy;
+
 const OPEN_POLICY: FileAccessPolicy = { restricted: false, folders: [] };
-let currentPolicy: () => FileAccessPolicy = () => OPEN_POLICY;
+let currentPolicy: FileAccessPolicyProvider = () => OPEN_POLICY;
 
-export function setFileAccessPolicy(provider: () => FileAccessPolicy): void { currentPolicy = provider; }
+export function setFileAccessPolicy(provider: FileAccessPolicyProvider): void { currentPolicy = provider; }
 
-export function fileAccessPolicy(): FileAccessPolicy {
+export function fileAccessPolicy(chatId?: string): FileAccessPolicy {
 	let policy: FileAccessPolicy;
-	try { policy = currentPolicy(); }
+	try { policy = currentPolicy(chatId); }
 	catch { throw new Error("File-access configuration error: preferences cannot be read. Repair File access in Settings → Agent → Tools."); }
 	if (policy?.error) throw new Error(policy.error);
 	if (!policy || typeof policy.restricted !== "boolean" || !Array.isArray(policy.folders) || policy.folders.some((folder) => typeof folder !== "string" || !path.isAbsolute(folder) || folder.includes("\0"))) {
@@ -86,6 +88,10 @@ export function resolvePolicy(policy: FileAccessPolicy = fileAccessPolicy()): Re
 		} catch { unavailable.push(`Unavailable allowed folder: ${folder}`); }
 	}
 	return { restricted: true, folders, unavailable };
+}
+
+export function resolvePolicyForChat(chatId?: string): ResolvedFileAccessPolicy {
+	return resolvePolicy(fileAccessPolicy(chatId));
 }
 
 /** Accept only canonical source locations contained by the snapshot. Source

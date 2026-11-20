@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { serverExecute, type ImageFileResult } from "../tool-execute.ts";
+import { resolvePolicyForChat } from "./file-access.ts";
 import { resolveSourcePath } from "./fs-shared.ts";
 import { detectSupportedImageMimeTypeFromFile, processImage } from "../image-processing/index.ts";
 
@@ -87,36 +88,48 @@ function readTextSlice(text: string, offset: number | undefined, limit: number |
  */
 export type ReadModel = Pick<Model<Api>, "input" | "inputLimits">;
 
+const builtinReadChatId = new WeakMap<AgentTool<any>["execute"], string | undefined>();
+
+export function isBuiltinReadExecute(execute: AgentTool<any>["execute"]): boolean {
+	return builtinReadChatId.has(execute);
+}
+
+export function readExecuteChatId(execute: AgentTool<any>["execute"]): string | undefined {
+	return builtinReadChatId.get(execute);
+}
+
 /** One implementation for every learner-file reader. Bind the active model
  * per agent, rather than sharing mutable model state between conversations.
  * Home-relative paths, text slicing and the app's abort guard stay unchanged;
  * image detection/processing and its notes follow native Pi read behavior. */
-export function createReadTool(model?: ReadModel): AgentTool<typeof readInput> {
+export function createReadTool(model?: ReadModel, chatId?: string): AgentTool<typeof readInput> {
+	const execute = serverExecute("read", readInput, async ({ path: rawPath, offset, limit }, { signal }): Promise<string | ImageFileResult> => {
+		const absolute = resolveSourcePath(rawPath, resolvePolicyForChat(chatId));
+		const mime = await detectSupportedImageMimeTypeFromFile(absolute);
+		const buffer = await fs.readFile(absolute, { signal });
+		if (mime) {
+			const processed = await processImage(buffer, mime, { resizeOptions: model?.inputLimits?.images?.resize });
+			signal?.throwIfAborted();
+			const note = processed.ok
+				? [`Read image file [${processed.mimeType}]`, ...processed.hints]
+				: [`Read image file [${mime}]`, processed.message];
+			if (model && !model.input.includes("image")) {
+				note.push("[Current model does not support images. The image will be omitted from this request.]");
+			}
+			return {
+				text: note.join("\n"),
+				...(processed.ok ? { images: [{ data: processed.data, mimeType: processed.mimeType }] } : {}),
+			};
+		}
+		return readTextSlice(buffer.toString("utf-8"), offset, limit);
+	});
+	builtinReadChatId.set(execute, chatId);
 	return {
 		name: "read",
 		label: "read",
 		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50.0KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. File access settings and protected-location denials apply; use ls without a path to discover allowed folders when restricted.`,
 		parameters: readInput,
-		execute: serverExecute("read", readInput, async ({ path: rawPath, offset, limit }, { signal }): Promise<string | ImageFileResult> => {
-			const absolute = resolveSourcePath(rawPath);
-			const mime = await detectSupportedImageMimeTypeFromFile(absolute);
-			const buffer = await fs.readFile(absolute, { signal });
-			if (mime) {
-				const processed = await processImage(buffer, mime, { resizeOptions: model?.inputLimits?.images?.resize });
-				signal?.throwIfAborted();
-				const note = processed.ok
-					? [`Read image file [${processed.mimeType}]`, ...processed.hints]
-					: [`Read image file [${mime}]`, processed.message];
-				if (model && !model.input.includes("image")) {
-					note.push("[Current model does not support images. The image will be omitted from this request.]");
-				}
-				return {
-					text: note.join("\n"),
-					...(processed.ok ? { images: [{ data: processed.data, mimeType: processed.mimeType }] } : {}),
-				};
-			}
-			return readTextSlice(buffer.toString("utf-8"), offset, limit);
-		}),
+		execute,
 	};
 }
 

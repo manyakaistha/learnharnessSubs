@@ -4,6 +4,9 @@
 import os from "node:os";
 import path from "node:path";
 import type { FileAccessPolicy } from "../agent/tools/file-access.ts";
+import type { CourseState } from "../core/contracts/courses.ts";
+import { courseOf, resolveCourseScope } from "../core/courses.ts";
+import { courseStore } from "../store/courses.ts";
 import { readFileAccessSettings } from "../store/settings.ts";
 
 export function expandFolder(folder: string, home: string = os.homedir()): string {
@@ -13,7 +16,24 @@ export function expandFolder(folder: string, home: string = os.homedir()): strin
 	return path.resolve(folder);
 }
 
-export function fileAccessPolicy(): FileAccessPolicy {
+export function fileAccessPolicy(chatId?: string): FileAccessPolicy {
+	if (chatId) {
+		let state: CourseState;
+		try { state = courseStore.read(); }
+		catch (error) { return { restricted: true, folders: [], error: error instanceof Error ? error.message : "Could not read courses." }; }
+		const courseId = courseOf(state, chatId);
+		if (courseId !== null) {
+			const scope = resolveCourseScope(state, courseId);
+			if (scope) {
+				const folders: string[] = [];
+				for (const folder of scope.folders) {
+					try { folders.push(expandFolder(folder.path)); }
+					catch { return { restricted: true, folders: [], error: `Invalid course folder path: ${folder.path}` }; }
+				}
+				return { restricted: true, folders };
+			}
+		}
+	}
 	const result = readFileAccessSettings();
 	if (!result.ok) return { restricted: true, folders: [], error: result.error };
 	return { restricted: result.settings.restricted, folders: result.settings.folders.map((folder) => expandFolder(folder)) };
