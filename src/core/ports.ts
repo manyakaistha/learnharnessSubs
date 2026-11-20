@@ -168,6 +168,12 @@ export interface SourceOrganizationStore {
 	write(state: import("./source-organization.ts").SourceOrganization): void;
 }
 
+/** data/graph/courses.json (core/contracts/courses.ts). Strict read/write. */
+export interface CourseStore {
+	read(): import("./contracts/courses.ts").CourseState;
+	write(state: import("./contracts/courses.ts").CourseState): void;
+}
+
 // ─── JobStore — background sub-agent jobs (data/jobs) ─────────────────────────
 
 export interface CreateJobInit {

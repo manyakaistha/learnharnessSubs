@@ -23,6 +23,8 @@ export interface ServerEvents {
 	"chats-changed": Record<string, never>;
 	/** Source inventory, display names, or organizational folders changed. */
 	"sources-changed": Record<string, never>;
+	/** Courses, membership, folders, or course-folder extraction state changed. */
+	"courses-changed": Record<string, never>;
 	/** Web subscription state changed. No account or credential data on the bus. */
 	"subscriptions-changed": Record<string, never>;
 	/** A chat's record changed WITHOUT a turn (the silent dismissal write).
@@ -54,6 +56,7 @@ export const SERVER_EVENT_TYPES = [
 	"activity-changed",
 	"chats-changed",
 	"sources-changed",
+	"courses-changed",
 	"subscriptions-changed",
 	"record-changed",
 	"compaction-changed",

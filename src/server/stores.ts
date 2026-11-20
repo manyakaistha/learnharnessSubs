@@ -9,6 +9,7 @@
 import { chatStore } from "../store/chats.ts";
 import { graphStore } from "../store/graph.ts";
 import { sourceOrganizationStore } from "../store/source-organization.ts";
+import { courseStore } from "../store/courses.ts";
 import { jobStore } from "../store/jobs.ts";
 import { settingsStore } from "../store/settings.ts";
 import { themeStore } from "../store/themes.ts";
@@ -20,6 +21,7 @@ export const stores = {
 	chatStore,
 	graphStore,
 	sourceOrganizationStore,
+	courseStore,
 	jobStore,
 	settingsStore,
 	themeStore,

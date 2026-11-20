@@ -74,3 +74,36 @@ export type CourseAction =
 	/** mode "ungroup": sources go to No course; "delete-sources": the caller
 	 * also deletes the course's own sources through source deletion. */
 	| { action: "delete"; id: string; mode: "ungroup" | "delete-sources" };
+
+// ─── HTTP transport (GET/POST /api/courses) ──────────────────────────────────
+
+export type CourseFileState = "queued" | "extracting" | "extracted" | "failed";
+
+/** One supported file found in a course folder, for the course panel. */
+export interface CourseFileStatus {
+	path: string;
+	folderId: string;
+	state: CourseFileState;
+	error?: string;
+}
+
+export interface CourseView extends Course {
+	/** Own sources (chats + files) assigned to the course. */
+	ownSourceIds: string[];
+	/** Transitive includes, resolved (excluding the course itself). */
+	includedCourseIds: string[];
+	/** Per-file extraction status across the course's own folders. */
+	files: CourseFileStatus[];
+	/** True while a scan/extraction pass runs for this course. */
+	scanning: boolean;
+}
+
+/** GET /api/courses and every POST /api/courses response. */
+export interface CoursesView {
+	courses: CourseView[];
+	membership: Record<string, string>;
+}
+
+/** POST /api/courses bodies: a CourseAction, or { action: "rescan", id } which
+ * starts a background scan of the course's folders (new/changed files). */
+export type CourseRequest = CourseAction | { action: "rescan"; id: string };
