@@ -55,7 +55,14 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	}
 	if (Object.keys(positions).length === 0) return {};
 
-	stores.graphStore.writePositions(positions);
+	// MERGE, never replace: a course-scoped canvas sends only its own nodes,
+	// and other nodes' resting positions must survive (still pruned to the
+	// current world, as before).
+	const existing = stores.graphStore.readPositions();
+	const merged: Record<string, Position> = {};
+	for (const [id, pos] of Object.entries(existing)) if (known.has(id)) merged[id] = pos;
+	Object.assign(merged, positions);
+	stores.graphStore.writePositions(merged);
 
 	// The graph grew past what the client knew (a merge landed mid-drag):
 	// absorb the new nodes with the client's rest state as anchors. The
@@ -63,7 +70,7 @@ export function commitPositions(input: unknown): Record<string, Position> {
 	// client's payload — proposition or arg_ alike (the old count
 	// comparison broke once args counted as persistable).
 	for (const id of known) {
-		if (!(id in positions)) {
+		if (!(id in merged)) {
 			settleGraphLayout(stores.graphStore);
 			break;
 		}

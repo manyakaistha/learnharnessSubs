@@ -98,6 +98,17 @@ describe("commitPositions (the arg_ fix)", () => {
 		assert.ok(Math.abs(after.n_a!.x - 1) < 50, `anchor n_a near its committed rest (got ${after.n_a!.x})`);
 	});
 
+	it("a partial payload (a course-scoped canvas) keeps every other node's resting position", () => {
+		commitPositions({ n_a: { x: 11, y: 12 }, n_b: { x: 13, y: 14 }, n_c: { x: 15, y: 16 }, arg_chain1: { x: 17, y: 18 } });
+		commitPositions({ n_a: { x: 900, y: 901 } });
+		assert.deepEqual(readPositions(), {
+			n_a: { x: 900, y: 901 },
+			n_b: { x: 13, y: 14 },
+			n_c: { x: 15, y: 16 },
+			arg_chain1: { x: 17, y: 18 },
+		});
+	});
+
 	it("garbage still sanitizes: non-finite drops, absurd clamps, nothing throws", () => {
 		const persisted = commitPositions({
 			n_a: { x: Number.NaN, y: 1 },

@@ -266,6 +266,20 @@ describe("courses pure helpers", () => {
 });
 
 describe("CoursesProvider fallback, persistence, and SSE refresh coalescing", () => {
+	it("rescans a course restored from storage once on app load", async () => {
+		localStorageStub.setItem(COURSE_FILTER_STORAGE_KEY, "course:crs_live");
+		const posts: CourseRequest[] = [];
+		globalThis.fetch = async (url, init) => {
+			if (url !== "/api/courses") throw new Error(`unexpected fetch ${String(url)}`);
+			if (init?.method === "POST") posts.push(JSON.parse(String(init.body)) as CourseRequest);
+			return Response.json({ courses: [makeCourse("crs_live", "CV")], membership: {} } satisfies CoursesView);
+		};
+		function Probe() { useCourses(); return null; }
+		await mountWithProviders(<Probe />);
+		await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+		assert.deepEqual(posts, [{ action: "rescan", id: "crs_live" }]);
+	});
+
 	it("falls back to All and updates localStorage when the stored course no longer exists", async () => {
 		localStorageStub.setItem(COURSE_FILTER_STORAGE_KEY, "course:crs_deleted");
 		globalThis.fetch = async (url) => {

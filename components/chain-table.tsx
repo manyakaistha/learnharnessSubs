@@ -446,6 +446,7 @@ export function ChainTableBody({
 									? <EditableSourceName name={group.label ?? ""} muted={empty} onSave={(name) => onOrganizationChange({ action: "rename-source", id: group.birth!, name })} />
 									: <span className={`min-w-0 flex-1 truncate text-sm font-medium${empty ? " text-muted-foreground/60" : ""}`}>{group.label ?? <span className="text-muted-foreground/60">unlabeled</span>}</span>}
 								{group.kind === "notes" && <span className="text-[11px] uppercase tracking-widest text-muted-foreground/60">notes</span>}
+								{group.kind === "notes" && group.birth && !selectMode && <SourceCourseSelect sourceId={group.birth} />}
 								<TreeCell widthClassName="w-14" align="right" className="text-xs tabular-nums text-muted-foreground">
 									{group.nodeIds.length}
 								</TreeCell>
@@ -634,6 +635,33 @@ export function ChainTableBody({
 
 /** The rotating chevron — collapsed points right, expanded rotates down
  *  (owner ruling: the affordance must read on every expandable row). */
+/** Move an imported file between courses (sessions use the sidebar menu). */
+function SourceCourseSelect({ sourceId }: { sourceId: string }) {
+	const { courses, membership, mutate } = useCourses();
+	const [error, setError] = useState("");
+	if (courses.length === 0) return null;
+	const current = Object.hasOwn(membership, sourceId) ? membership[sourceId]! : "";
+	return (
+		<span className="flex shrink-0 items-center gap-1">
+			<select
+				aria-label="Course"
+				data-testid={`source-course-${sourceId}`}
+				value={current}
+				onClick={(e) => e.stopPropagation()}
+				onChange={(e) => {
+					setError("");
+					void mutate({ action: "assign", sourceId, courseId: e.target.value || null }).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+				}}
+				className="h-5 max-w-28 truncate rounded-sm border border-border bg-background px-1 text-[11px] text-muted-foreground outline-none"
+			>
+				<option value="">No course</option>
+				{courses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+			</select>
+			{error && <span role="alert" className="text-[11px] text-error">{error}</span>}
+		</span>
+	);
+}
+
 function Expander({ open, onClick, testid, label }: { open: boolean; onClick: () => void; testid: string; label: string }) {
 	return <TreeDisclosure open={open} onClick={onClick} data-testid={testid} aria-label={label} />;
 }

@@ -241,6 +241,16 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 		[applyView],
 	);
 
+	// "Opening a course" includes reopening the app with one restored: after
+	// the first load reconciles the stored filter, rescan it once.
+	const bootRescanRef = useRef(false);
+	useEffect(() => {
+		if (bootRescanRef.current || !loaded) return;
+		bootRescanRef.current = true;
+		const restored = filterRef.current;
+		if (restored.kind === "course") void mutate({ action: "rescan", id: restored.courseId }).catch(() => {});
+	}, [loaded, mutate]);
+
 	const setFilter = useCallback(
 		(next: CourseFilter) => {
 			const prev = filterRef.current;
