@@ -844,3 +844,15 @@ describe("CoursePanelBody & CoursePanelDialog managed folder and excluded files"
 		assert.equal(document.querySelector('[data-testid="course-file-include"]'), null);
 	});
 });
+
+describe("sameAttachTarget", () => {
+	it("matches the same chat, and a draft only by identity", async () => {
+		const { sameAttachTarget } = await import("../components/courses.tsx");
+		const draft = { kind: "draft" as const, onStageFiles: () => {} };
+		assert.equal(sameAttachTarget({ kind: "chat", chatId: "a" }, { kind: "chat", chatId: "a" }), true);
+		assert.equal(sameAttachTarget({ kind: "chat", chatId: "a" }, { kind: "chat", chatId: "b" }), false);
+		assert.equal(sameAttachTarget(draft, draft), true);
+		assert.equal(sameAttachTarget(draft, { kind: "draft", onStageFiles: () => {} }), false);
+		assert.equal(sameAttachTarget({ kind: "chat", chatId: "a" }, null), false);
+	});
+});

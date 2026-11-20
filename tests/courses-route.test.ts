@@ -928,3 +928,31 @@ it("preserves exact validation messages for bounded JSON requests and ~ expansio
 		if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
 	}
 });
+
+it("an upload whose file lands outside the managed folder (directory swapped after validation) writes no bytes there", async () => {
+	const fsp = (await import("node:fs/promises")).default;
+	const courseId = (await (await postCourse({ action: "create", name: "SwapRace" })).json()).courses.find((c: { name: string }) => c.name === "SwapRace").id as string;
+	const elsewhere = fs.realpathSync.native(fs.mkdtempSync(path.join(root, "swap-target-")));
+	const realRealpath = fsp.realpath;
+	// Simulate the swap: the opened file resolves into another directory.
+	(fsp as { realpath: typeof fsp.realpath }).realpath = (async (p: Parameters<typeof fsp.realpath>[0], ...rest: unknown[]) => {
+		const resolved = await (realRealpath as (...a: unknown[]) => Promise<string>)(p, ...rest);
+		if (String(p).endsWith(`${path.sep}swap.md`)) {
+			const moved = path.join(elsewhere, "swap.md");
+			fs.renameSync(resolved, moved);
+			return moved;
+		}
+		return resolved;
+	}) as typeof fsp.realpath;
+	try {
+		const form = new FormData();
+		form.append("courseId", courseId);
+		form.append("files", new File(["# secret bytes"], "swap.md"));
+		const res = await courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+		assert.equal(res.status, 400);
+		assert.match((await res.json()).error, /changed while uploading/);
+	} finally {
+		(fsp as { realpath: typeof fsp.realpath }).realpath = realRealpath;
+	}
+	assert.deepEqual(fs.readdirSync(elsewhere), [], "the misplaced (empty) file is removed and never received bytes");
+});

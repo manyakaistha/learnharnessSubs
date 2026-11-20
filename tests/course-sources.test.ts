@@ -634,4 +634,42 @@ it("carries PDF scanner and skipped image-only page notices into course file sta
 		state: "failed",
 		error: "OCR not supported yet.",
 	});
+
+	// An unchanged rescan keeps the notice (recorded with the extraction).
+	received.length = 0;
+	startCourseScan(courseId);
+	while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+	assert.deepEqual(received, [], "nothing unchanged is re-extracted (scan.pdf fails before the extractor)");
+	assert.equal(courseFileStatuses(courseId).find((s) => s.path === mixedPdf)?.notice,
+		"Scanned pages may have errors. Skipped 1 image-only page; OCR is not supported.");
+});
+
+it("a deletion that lands while a file is being read or decoded stops it before the extractor runs", async () => {
+	const fsp = (await import("node:fs/promises")).default;
+	const folder = path.join(root, "delete-during-read");
+	const target = writeText(path.join(folder, "late.md"), "# late");
+	const { courseId, folderId } = createCourseWithFolder("LateDelete", folder);
+	const seen: string[] = [];
+	setCourseExtractorForTests(async ({ filePath }) => { seen.push(filePath); return { nodes: 1, chains: 0 }; });
+	const realReadFile = fsp.readFile;
+	let reads = 0;
+	(fsp as { readFile: typeof fsp.readFile }).readFile = (async (...args: Parameters<typeof fsp.readFile>) => {
+		const result = await realReadFile(...args);
+		// The second read is the extraction-time read: exclude the file now.
+		if (String(args[0]) === target && ++reads === 2) {
+			const state = stores.courseStore.read();
+			state.folderFiles[target] = { courseId, folderId, sourceId: courseFileSourceId(target), sha256: "x", extractedAt: "t", excluded: true };
+			stores.courseStore.write(state);
+		}
+		return result;
+	}) as typeof fsp.readFile;
+	try {
+		startCourseScan(courseId);
+		while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+	} finally {
+		(fsp as { readFile: typeof fsp.readFile }).readFile = realReadFile;
+	}
+	assert.equal(reads >= 2, true);
+	assert.deepEqual(seen, [], "the extractor never ran for the deleted file");
+	assert.equal(courseFileStatuses(courseId).find((s) => s.path === target)?.state, "excluded");
 });

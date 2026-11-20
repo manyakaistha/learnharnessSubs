@@ -162,14 +162,20 @@ function removeFileStatus(courseId: string, absPath: string): void {
 async function runExtractWithBusyRetry(
 	courseId: string,
 	folderId: string,
+	absPath: string,
 	input: { sourceId: string; filePath: string; text: string },
-): Promise<"ok" | "cancelled"> {
+): Promise<"ok" | "cancelled" | "excluded"> {
 	const extract: CourseExtractor =
 		runtime().extractorOverride ??
 		((args) => extraction.importNotes({ filePath: args.filePath, text: args.text, sourceId: args.sourceId }));
 	const deadline = Date.now() + BUSY_MAX_WAIT_MS;
 	for (;;) {
-		if (!isCourseActive(courseId, folderId)) return "cancelled";
+		// Checked synchronously right before the extractor starts (no await in
+		// between), so a deletion that landed during read/decode is honoured
+		// before any graph write; once extracting, source deletion is refused.
+		const state = isCourseActive(courseId, folderId);
+		if (!state) return "cancelled";
+		if (state.folderFiles[absPath]?.excluded) return "excluded";
 		try {
 			await extract(input);
 			return "ok";
@@ -247,7 +253,7 @@ async function runCourseScan(courseId: string, initialFolders: CourseFolder[] = 
 			if (recorded && recorded.courseId === courseId && recorded.excluded) {
 				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "excluded" });
 			} else if (recorded && recorded.sha256 === sha256 && recorded.courseId === courseId) {
-				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "extracted" });
+				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "extracted", ...(recorded.notice ? { notice: recorded.notice } : {}) });
 			} else {
 				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "queued" });
 				queue.push({ absPath: file.absPath, folder: file.folder });
@@ -308,11 +314,16 @@ async function runCourseScan(courseId: string, initialFolders: CourseFolder[] = 
 
 				const sourceId = courseFileSourceId(item.absPath);
 				const displayPath = courseFileDisplayPath(item.folder.path, item.absPath);
-				const result = await runExtractWithBusyRetry(courseId, item.folder.id, {
+				const result = await runExtractWithBusyRetry(courseId, item.folder.id, item.absPath, {
 					sourceId,
 					filePath: displayPath,
 					text: decoded.text,
 				});
+				if (result === "excluded") {
+					setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "excluded" });
+					emit("courses-changed", {});
+					continue;
+				}
 				if (result === "cancelled") {
 					if (!isCourseActive(courseId)) {
 						rt.statuses.delete(courseId);
@@ -361,6 +372,7 @@ async function runCourseScan(courseId: string, initialFolders: CourseFolder[] = 
 							sourceId,
 							sha256,
 							extractedAt: new Date().toISOString(),
+							...(decoded.notice ? { notice: decoded.notice } : {}),
 						},
 					},
 				};
@@ -508,7 +520,7 @@ export function courseFileStatuses(courseId: string): CourseFileStatus[] {
 	for (const [absPath, rec] of Object.entries(state.folderFiles)) {
 		if (rec.courseId !== courseId || !folderIds.has(rec.folderId)) continue;
 		if (!fsSync.existsSync(/* turbopackIgnore: true */ absPath)) continue;
-		out.push({ path: absPath, folderId: rec.folderId, state: rec.excluded ? "excluded" : "extracted" });
+		out.push({ path: absPath, folderId: rec.folderId, state: rec.excluded ? "excluded" : "extracted", ...(!rec.excluded && rec.notice ? { notice: rec.notice } : {}) });
 	}
 	return out;
 }

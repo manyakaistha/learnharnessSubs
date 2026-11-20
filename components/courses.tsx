@@ -23,6 +23,14 @@ export type CourseAttachTarget =
 	| { kind: "chat"; chatId: string }
 	| { kind: "draft"; onStageFiles: (paths: readonly string[]) => void };
 
+/** Same composer target? Async attach work completes only into the target
+ * it started from; drafts compare by identity (a new draft is a new target). */
+export function sameAttachTarget(a: CourseAttachTarget | null, b: CourseAttachTarget | null): boolean {
+	if (a === null || b === null) return a === b;
+	if (a.kind === "chat" && b.kind === "chat") return a.chatId === b.chatId;
+	return a === b;
+}
+
 export function courseAttachModeKey(courseId: string): string {
 	return `${COURSE_ATTACH_MODE_STORAGE_PREFIX}${courseId}`;
 }

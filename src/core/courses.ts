@@ -204,7 +204,8 @@ export function parseCourseState(raw: unknown): CourseState {
 	for (const f of Object.values(r.folderFiles!)) {
 		if (!f || typeof f !== "object" || typeof f.courseId !== "string" || typeof f.folderId !== "string"
 			|| typeof f.sourceId !== "string" || typeof f.sha256 !== "string" || typeof f.extractedAt !== "string"
-			|| (f.excluded !== undefined && typeof f.excluded !== "boolean")) return fail();
+			|| (f.excluded !== undefined && typeof f.excluded !== "boolean")
+			|| (f.notice !== undefined && typeof f.notice !== "string")) return fail();
 	}
 	const sessionFiles = (r as { sessionFiles?: unknown }).sessionFiles;
 	if (sessionFiles !== undefined) {

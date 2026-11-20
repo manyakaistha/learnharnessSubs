@@ -11,6 +11,7 @@ import { BROWSER_NOTICE } from "@/components/file-path-drop-zone";
 import {
 	readCourseAttachMode,
 	resolveCourseAttachCourseId,
+	sameAttachTarget,
 	useCourses,
 	writeCourseAttachMode,
 	type CourseAttachMode,
@@ -234,12 +235,20 @@ export function AttachFilesButton({
 		setUploading(true);
 		setError("");
 		setNotice("Adding to course sources…");
+		const startEditor = editorRef.current;
+		const startTarget = getAttachTarget();
 		try {
 			const res = await uploadFiles(courseId, files, targetChatId);
 			setNotice("");
 			if (res.copied.length > 0) {
-				editorRef.current?.dispatchEvent(new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: res.copied }));
-				if (!targetChatId) stageDraft?.(res.copied);
+				// Only into the composer the upload started from: switching chats
+				// meanwhile must not put paths (granted to the old chat) elsewhere.
+				if (startEditor?.isConnected && startEditor === editorRef.current && sameAttachTarget(startTarget, getAttachTarget())) {
+					startEditor.dispatchEvent(new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: res.copied }));
+					if (!targetChatId) stageDraft?.(res.copied);
+				} else {
+					setNotice("Added to course sources. Switch back to that session to reference the files.");
+				}
 			}
 		} catch (err) {
 			setNotice("");

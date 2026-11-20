@@ -37,6 +37,9 @@ export interface CourseFolderFile {
 	/** Its knowledge was deleted by the learner: rescans skip the file until
 	 * "Include again" ({ action: "include-file" }) clears this entry. */
 	excluded?: boolean;
+	/** Decoder notice from the last extraction (e.g. image-only PDF pages
+	 * skipped), kept so unchanged rescans still show it. */
+	notice?: string;
 }
 
 export interface CourseState {

@@ -346,19 +346,36 @@ function oversizeUploadMessage(): string {
 	return `File is too large (max ${Math.round(MAX_IMPORT_BYTES / (1024 * 1024))} MB).`;
 }
 
-async function writeUniqueCourseFile(dir: string, filename: string, bytes: Uint8Array): Promise<string> {
+async function writeUniqueCourseFile(dir: string, realDir: string, filename: string, bytes: Uint8Array): Promise<string> {
 	const ext = path.extname(filename);
 	const stem = filename.slice(0, filename.length - ext.length);
+	const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants;
+	const flags = O_WRONLY | O_CREAT | O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
 	for (let n = 1; ; n++) {
 		const candidateName = n === 1 ? filename : `${stem} (${n})${ext}`;
 		const targetPath = path.join(/* turbopackIgnore: true */ dir, candidateName);
+		let handle: fsPromises.FileHandle;
 		try {
-			await fsPromises.writeFile(/* turbopackIgnore: true */ targetPath, bytes, { flag: "wx" });
-			return targetPath;
+			handle = await fsPromises.open(/* turbopackIgnore: true */ targetPath, flags, 0o644);
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
 			throw err;
 		}
+		try {
+			// Verify where the (still empty) file actually landed BEFORE writing:
+			// a directory swapped for a link after validation must not receive data.
+			const real = await fsPromises.realpath(/* turbopackIgnore: true */ targetPath);
+			const [opened, onDisk] = await Promise.all([handle.stat(), fsPromises.stat(/* turbopackIgnore: true */ real)]);
+			if (path.dirname(real) !== realDir || opened.ino !== onDisk.ino || opened.dev !== onDisk.dev) {
+				await handle.close();
+				await fsPromises.unlink(/* turbopackIgnore: true */ real).catch(() => undefined);
+				throw new CourseInputError("The course's managed file folder changed while uploading. Try again.");
+			}
+			await handle.writeFile(bytes);
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
+		return targetPath;
 	}
 }
 
@@ -368,7 +385,7 @@ export interface AddCourseFilesInput {
 	chatId?: string | null;
 }
 
-async function assertManagedCourseDir(managedRoot: string, managedDir: string): Promise<void> {
+async function assertManagedCourseDir(managedRoot: string, managedDir: string): Promise<string> {
 	const refuse = () => { throw new CourseInputError("The course's managed file folder is not a plain folder inside LearnHarness data."); };
 	for (const dir of [managedRoot, managedDir]) {
 		const st = await fsPromises.lstat(/* turbopackIgnore: true */ dir).catch(() => null);
@@ -377,6 +394,7 @@ async function assertManagedCourseDir(managedRoot: string, managedDir: string): 
 	const realRoot = await fsPromises.realpath(/* turbopackIgnore: true */ managedRoot);
 	const realDir = await fsPromises.realpath(/* turbopackIgnore: true */ managedDir);
 	if (path.dirname(realDir) !== realRoot || path.basename(realDir) !== path.basename(managedDir)) refuse();
+	return realDir;
 }
 
 /** Copy uploaded files into `<data>/course-files/<courseId>/`, attach the
@@ -447,8 +465,8 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 		for (const { filename, bytes } of entries) {
 			// Re-checked before every write: the managed directory must be a
 			// real directory directly inside the managed root, never a link.
-			await assertManagedCourseDir(managedRoot, managedDir);
-			copied.push(await writeUniqueCourseFile(managedDir, filename, bytes));
+			const realDir = await assertManagedCourseDir(managedRoot, managedDir);
+			copied.push(await writeUniqueCourseFile(managedDir, realDir, filename, bytes));
 		}
 
 		const state = stores.courseStore.read();

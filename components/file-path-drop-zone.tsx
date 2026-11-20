@@ -5,7 +5,7 @@ import { FileSymlinkIcon, XIcon } from "lucide-react";
 import { directoryReferencePath, quoteFilePath } from "@/src/core";
 import { appendToPrimaryInput } from "@/components/dictation";
 import { INSERT_FILE_PATHS_EVENT } from "@/components/path-input";
-import { readCourseAttachMode, resolveCourseAttachCourseId, useCourses } from "@/components/courses";
+import { readCourseAttachMode, resolveCourseAttachCourseId, sameAttachTarget, useCourses } from "@/components/courses";
 
 export const BROWSER_NOTICE = "Local file paths can only be attached in the desktop app. You can paste a full path instead.";
 
@@ -104,6 +104,12 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 					void uploadFiles(dropCourseId, filesToUpload, chatId)
 						.then((res) => {
 							if (res.copied.length > 0) {
+								// Only into the session the drop started in (see sameAttachTarget).
+								if (!sameAttachTarget(target, getAttachTarget() ?? attachTarget)) {
+									setNoticeError(false);
+									setNotice("Added to course sources. Switch back to that session to reference the files.");
+									return;
+								}
 								if (!insertPaths(res.copied)) {
 									setNoticeError(false);
 									setNotice("Open a chat to attach file paths.");
