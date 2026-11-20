@@ -5,6 +5,7 @@ import "katex/dist/katex.min.css";
 import "./globals.css";
 import { AppShell, SidebarProvider } from "@/components/sidebar";
 import { ActivityProvider } from "@/components/activity-dock";
+import { CoursesProvider } from "@/components/courses";
 import { ServerEventsProvider } from "@/components/server-events";
 import { AppearanceProvider } from "@/components/settings/appearance";
 import UpdateBanner from "@/components/update-banner";
@@ -41,11 +42,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 			<ServerEventsProvider>
 				<PluginsProvider>
 					<AppearanceProvider initialAppearance={appearance} initialTheme={theme}>
-						<SidebarProvider>
-							<ActivityProvider>
-								<AppShell>{children}</AppShell>
-							</ActivityProvider>
-						</SidebarProvider>
+						<CoursesProvider>
+							<SidebarProvider>
+								<ActivityProvider>
+									<AppShell>{children}</AppShell>
+								</ActivityProvider>
+							</SidebarProvider>
+						</CoursesProvider>
 					</AppearanceProvider>
 				</PluginsProvider>
 			</ServerEventsProvider>

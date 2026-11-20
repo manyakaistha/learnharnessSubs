@@ -69,9 +69,10 @@ import { PluginGraphActions } from "@/components/plugin-chrome";
 import { SettingsSlider as SettingSlider } from "@/components/settings/controls";
 import Link from "next/link";
 import { FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
-import { incrementalLayout, propositionSessionHref, type GraphCostSummary, type GraphNode, type GraphSnapshot } from "@/src/core";
+import { incrementalLayout, propositionSessionHref, type CourseView, type GraphCostSummary, type GraphNode, type GraphSnapshot } from "@/src/core";
 import { planCostLabel } from "@/components/usage-format";
-import { CLUSTER_LIGHTNESS, GraphCanvasRenderer, type GraphRenderSettings } from "./graph-canvas.ts";
+import { CLUSTER_LIGHTNESS, GraphCanvasRenderer, type CanvasNode, type GraphRenderSettings } from "./graph-canvas.ts";
+import { courseQueryParam, useCourses } from "@/components/courses";
 import { useAppearance } from "@/components/settings/appearance";
 import { usePopoverDismiss } from "@/components/popover-dismiss";
 import { INTERACTION_LAYER_Z_BASE } from "@/components/host-dialog";
@@ -899,6 +900,42 @@ export function GraphChromeRow({
  *  overrides are what keep the card's own type. */
 const NODE_CARD_TYPE = "[--font-prose:var(--font-ui)] " +
 	"[&_[data-streamdown=inline-code]]:[font-size:inherit] [&_[data-streamdown=inline-code]]:[color:inherit]";
+export function toCanvasNode(node: Pick<GraphNode, "id" | "name" | "inherited">, pos: { x: number; y: number }): CanvasNode {
+	return {
+		id: node.id,
+		x: pos.x,
+		y: pos.y,
+		label: node.name,
+		...(node.inherited ? { inherited: true } : {}),
+	};
+}
+
+export function resolveNodeCourseNames(
+	courseIds: readonly string[] | undefined,
+	courses: readonly Pick<CourseView, "id" | "name">[],
+): string[] {
+	if (!courseIds || courseIds.length === 0) return [];
+	const byId = new Map(courses.map((c) => [c.id, c.name]));
+	return courseIds.map((id) => byId.get(id) ?? id);
+}
+
+export function NodeCardCourses({ courses }: { courses: readonly string[] }) {
+	if (courses.length === 0) return null;
+	return (
+		<div className="mt-2.5 flex flex-wrap items-center gap-1" data-testid="node-card-courses">
+			<span className="text-xs text-muted-foreground">Courses:</span>
+			{courses.map((name, i) => (
+				<span
+					key={`${name}-${i}`}
+					className="rounded border border-border/70 bg-muted/40 px-1.5 py-0.5 text-[11px] text-foreground"
+				>
+					{name}
+				</span>
+			))}
+		</div>
+	);
+}
+
 export function NodeCardText({ name, statement }: Pick<GraphNode, "name" | "statement">) {
 	return (
 		<>
@@ -966,6 +1003,8 @@ export function GraphView({
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const cardRef = useRef<HTMLDivElement | null>(null);
 	const { resolvedMode, colors } = useAppearance();
+	const { filter, courses, activeCourse, revision: coursesRevision } = useCourses();
+	const courseQuery = courseQueryParam(filter);
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const [selected, setSelected] = useState<Selection | null>(null);
 	// The latest snapshot for the renderer's click callbacks (they are
@@ -1073,8 +1112,12 @@ export function GraphView({
 		if (chainSelectOpen) setChainsOpen(true);
 	}, [chainSelectOpen]);
 	useEffect(() => {
+		setSelected(null);
+		setCtxNode(null);
+	}, [courseQuery]);
+	useEffect(() => {
 		let cancelled = false;
-		fetch("/api/graph")
+		fetch(`/api/graph${courseQuery}`)
 			.then((res) => res.json() as Promise<GraphSnapshot>)
 			.then((data) => {
 				if (!cancelled) setSnapshot(data);
@@ -1083,7 +1126,7 @@ export function GraphView({
 		return () => {
 			cancelled = true;
 		};
-	}, [refreshTick]);
+	}, [refreshTick, courseQuery, coursesRevision]);
 
 	// Notes import (the format-agnostic front door): file picker → POST
 	// /api/graph/import; the runs surface in the status chips below, and the
@@ -1405,12 +1448,7 @@ export function GraphView({
 		const positions = posRef.current;
 		if (!renderer || !snapshot || snapshot.nodes.length === 0 || !positions) return;
 		renderer.setData({
-			nodes: snapshot.nodes.map((n) => ({
-				id: n.id,
-				x: positions.get(n.id)?.x ?? 0,
-				y: positions.get(n.id)?.y ?? 0,
-				label: n.name,
-			})),
+			nodes: snapshot.nodes.map((n) => toCanvasNode(n, positions.get(n.id) ?? { x: 0, y: 0 })),
 			edges: snapshot.edges.map((e) => ({ from: e.from, to: e.to })),
 			logicalEdges: snapshot.logicalEdges.map((e) => ({ from: e.from, to: e.to })),
 			impLinks: snapshot.impLinks,
@@ -1476,8 +1514,17 @@ export function GraphView({
 						<WaypointsIcon className="size-10 opacity-40" strokeWidth={1.25} />
 						<div className="text-lg font-medium text-foreground">Knowledge graph</div>
 						<div className="max-w-sm text-sm">
-							<p>Start a session to begin learning.</p>
-							<p className="mt-1 text-xs">Attach your material with the paperclip or drag and drop.</p>
+							{activeCourse ? (
+								<>
+									<p>Start a session in {activeCourse.name} to begin learning.</p>
+									<p className="mt-1 text-xs">Attach a folder in Course settings or drop files here.</p>
+								</>
+							) : (
+								<>
+									<p>Start a session to begin learning.</p>
+									<p className="mt-1 text-xs">Attach your material with the paperclip or drag and drop.</p>
+								</>
+							)}
 						</div>
 					</div>
 				</div>
@@ -1629,6 +1676,7 @@ export function GraphView({
 					className="lh-no-drag absolute z-10 w-80 max-w-[calc(100%-1rem)] rounded-xl border bg-card p-4 text-left shadow-lg"
 				>
 					<NodeCardText name={selected.node.name} statement={selected.node.statement} />
+					<NodeCardCourses courses={resolveNodeCourseNames(selected.node.courses, courses)} />
 					{selected.sourceIds.length > 0 ? (
 						<div className="mt-3 flex flex-col gap-1">
 							<div className="text-xs text-muted-foreground">Sessions</div>
