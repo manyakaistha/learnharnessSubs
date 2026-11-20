@@ -496,6 +496,7 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 	const otherCourseId = (await (await postCourse({ action: "create", name: "Other" })).json()).courses.find((c: { name: string }) => c.name === "Other").id as string;
 	const chatMl = stores.chatStore.createChat("ML session");
 	const chatOther = stores.chatStore.createChat("Other session");
+	const chatFree = stores.chatStore.createChat("No course session");
 	await postCourse({ action: "assign", sourceId: chatMl.id, courseId });
 	await postCourse({ action: "assign", sourceId: chatOther.id, courseId: otherCourseId });
 
@@ -544,17 +545,27 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 		[`${courseId}/week1 (2).md`, `${courseId}/week1.md`],
 	);
 
-	// Second upload reuses existing managed folder (still 1 folder), increments clash suffix, ignores non-course chatId
+	// Rejects chatId belonging to a different course, an unassigned chatId, or a missing chatId with 400 without writing files
+	for (const badChatId of [chatOther.id, chatFree.id, "chat_missing"]) {
+		const badChatRes = await uploadFiles({
+			courseId,
+			chatId: badChatId,
+			files: [{ name: "rejected.md", body: "# Should not copy" }],
+		});
+		assert.equal(badChatRes.status, 400, `expected 400 for chatId ${badChatId}`);
+		assert.equal(fs.existsSync(path.join(expectedDir, "rejected.md")), false);
+		assert.equal(stores.courseStore.read().sessionFiles[badChatId], undefined);
+	}
+
+	// Second upload (no chatId) reuses existing managed folder (still 1 folder) and increments clash suffix
 	const res2 = await uploadFiles({
 		courseId,
-		chatId: chatOther.id,
 		files: [{ name: "week1.md", body: "# Week 1 v3" }],
 	});
 	assert.equal(res2.status, 200);
 	const body2 = await res2.json();
 	assert.deepEqual(body2.copied, [path.join(expectedDir, "week1 (3).md")]);
 	assert.equal(body2.courses.find((c: { id: string }) => c.id === courseId).folders.length, 1);
-	assert.equal(stores.courseStore.read().sessionFiles[chatOther.id], undefined);
 	await waitForCourseScanForTests(courseId);
 
 	// Validation errors: missing/unknown courseId, no files, bad filenames, unsupported types, oversize

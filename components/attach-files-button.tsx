@@ -8,7 +8,13 @@ import { cn } from "@/lib/utils";
 import { Hint } from "@/components/ui/hint";
 import { INSERT_FILE_PATHS_EVENT } from "@/components/path-input";
 import { BROWSER_NOTICE } from "@/components/file-path-drop-zone";
-import { readCourseAttachMode, useCourses, writeCourseAttachMode, type CourseAttachMode } from "@/components/courses";
+import {
+	readCourseAttachMode,
+	resolveCourseAttachCourseId,
+	useCourses,
+	writeCourseAttachMode,
+	type CourseAttachMode,
+} from "@/components/courses";
 import { InteractionLayerOwner, useInteractionLayer, useInteractionLayers, useOptionalInteractionLayers } from "./interaction-layers";
 import { INTERACTION_LAYER_Z_BASE } from "./host-dialog";
 import { isInteractionScopeEligible } from "./plugin-input-focus";
@@ -93,7 +99,7 @@ export function AttachFilesButton({
 	onStageSessionFiles?: (paths: readonly string[]) => void;
 }) {
 	const controller = useOptionalInteractionLayers();
-	const { activeCourseId, mutate: mutateCourses, uploadFiles, getAttachTarget } = useCourses();
+	const { activeCourseId, membership, mutate: mutateCourses, uploadFiles, getAttachTarget, attachTarget } = useCourses();
 	const pickerRef = useRef<HTMLInputElement>(null);
 	const desktop = useDesktopPaths();
 	const buttonRef = useRef<HTMLButtonElement>(null);
@@ -106,26 +112,28 @@ export function AttachFilesButton({
 	const [attachMode, setAttachMode] = useState<CourseAttachMode>("session");
 	const [placement, setPlacement] = useState<ReturnType<typeof attachmentPopupPlacement> | null>(null);
 	const positioned = placement !== null;
-	const interactive = desktop || activeCourseId !== null;
+	const targetCourseId = resolveCourseAttachCourseId(attachTarget ?? getAttachTarget(), membership, activeCourseId, chatId);
+	const interactive = desktop || targetCourseId !== null;
 
 	useEffect(() => {
-		if (activeCourseId) setAttachMode(readCourseAttachMode(activeCourseId));
+		if (targetCourseId) setAttachMode(readCourseAttachMode(targetCourseId));
 		else {
 			setError("");
 			setUploading(false);
 		}
-	}, [activeCourseId]);
+	}, [targetCourseId]);
 
 	const selectAttachMode = (next: CourseAttachMode) => {
 		setAttachMode(next);
-		if (activeCourseId) writeCourseAttachMode(activeCourseId, next);
+		if (targetCourseId) writeCourseAttachMode(targetCourseId, next);
 	};
 
 	const resolveTarget = () => {
-		const registered = getAttachTarget();
+		const registered = getAttachTarget() ?? attachTarget;
 		const targetChatId = chatId ?? (registered?.kind === "chat" ? registered.chatId : undefined);
 		const stageDraft = onStageSessionFiles ?? (registered?.kind === "draft" ? registered.onStageFiles : undefined);
-		return { targetChatId, stageDraft };
+		const courseId = resolveCourseAttachCourseId(registered, membership, activeCourseId, chatId);
+		return { targetChatId, stageDraft, courseId };
 	};
 
 	// Like MenuShell, portal to body with viewport-capped, reanchored placement.
@@ -188,14 +196,14 @@ export function AttachFilesButton({
 	};
 	const handlePickedFiles = async (files: File[]) => {
 		if (files.length === 0) return;
-		if (!activeCourseId) {
+		const { targetChatId, stageDraft, courseId } = resolveTarget();
+		if (!courseId) {
 			const resolve = window.lh?.getPathForFile;
 			const { paths } = resolve ? pathsForFiles(files, resolve) : { paths: [] };
 			if (paths.length > 0) editorRef.current?.dispatchEvent(new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: paths }));
 			return;
 		}
-		const mode = readCourseAttachMode(activeCourseId);
-		const { targetChatId, stageDraft } = resolveTarget();
+		const mode = readCourseAttachMode(courseId);
 		if (mode === "session") {
 			const resolve = window.lh?.getPathForFile;
 			if (!resolve) {
@@ -227,7 +235,7 @@ export function AttachFilesButton({
 		setError("");
 		setNotice("Adding to course sources…");
 		try {
-			const res = await uploadFiles(activeCourseId, files, targetChatId);
+			const res = await uploadFiles(courseId, files, targetChatId);
 			setNotice("");
 			if (res.copied.length > 0) {
 				editorRef.current?.dispatchEvent(new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: res.copied }));
@@ -255,7 +263,7 @@ export function AttachFilesButton({
 					void handlePickedFiles(picked);
 				}}
 			/>
-			<Hint label={desktop ? "Attach files or a folder" : activeCourseId ? "Attach files" : BROWSER_NOTICE}>
+			<Hint label={desktop ? "Attach files or a folder" : targetCourseId ? "Attach files" : BROWSER_NOTICE}>
 				<button
 					ref={buttonRef}
 					type="button"
@@ -266,7 +274,7 @@ export function AttachFilesButton({
 					data-testid="attach-files"
 					onClick={() => {
 						if (!interactive || uploading) return;
-						if (activeCourseId) setAttachMode(readCourseAttachMode(activeCourseId));
+						if (targetCourseId) setAttachMode(readCourseAttachMode(targetCourseId));
 						setNotice("");
 						setError("");
 						setOpen(!open);
@@ -288,7 +296,7 @@ export function AttachFilesButton({
 					if (next >= 0) { event.preventDefault(); buttons[next]?.focus(); }
 				}}>
 				{open ? <>
-					{activeCourseId && (
+					{targetCourseId && (
 						<div
 							role="radiogroup"
 							aria-label="Attachment mode"
@@ -327,7 +335,7 @@ export function AttachFilesButton({
 					)}
 					<button type="button" role="menuitem" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-accent"
 						onClick={() => { setOpen(false); pickerRef.current?.click(); }}>Files</button>
-					{(!activeCourseId || attachMode === "session") && (
+					{(!targetCourseId || attachMode === "session") && (
 						<button type="button" role="menuitem" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-accent"
 							onClick={() => { void chooseFolder(); }}>Folder</button>
 					)}

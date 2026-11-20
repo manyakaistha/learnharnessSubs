@@ -367,6 +367,14 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 	if (chatId === "__proto__" || chatId === "constructor" || chatId === "prototype") {
 		throw new CourseInputError("Invalid chat ID.");
 	}
+	if (chatId) {
+		if (!stores.chatStore.getChat(chatId)) {
+			throw new CourseInputError("Session no longer exists.");
+		}
+		if (courseOf(initialState, chatId) !== courseId) {
+			throw new CourseInputError("Session does not belong to this course.");
+		}
+	}
 	if (input.files.length === 0) {
 		throw new CourseInputError("Select at least one file.");
 	}
@@ -419,7 +427,13 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 			addedFolder.managed = true;
 		}
 
-		if (chatId && stores.chatStore.getChat(chatId) && courseOf(next, chatId) === courseId) {
+		if (chatId) {
+			if (!stores.chatStore.getChat(chatId)) {
+				throw new CourseInputError("Session no longer exists.");
+			}
+			if (courseOf(next, chatId) !== courseId) {
+				throw new CourseInputError("Session does not belong to this course.");
+			}
 			// Grants are canonical (the policy refuses a grant that resolves elsewhere).
 			const grants = copied.map((p) => fs.realpathSync.native(/* turbopackIgnore: true */ p));
 			next = applyCourseAction(next, { action: "attach-session-files", chatId, paths: grants }, {

@@ -5,7 +5,7 @@ import { FileSymlinkIcon, XIcon } from "lucide-react";
 import { directoryReferencePath, quoteFilePath } from "@/src/core";
 import { appendToPrimaryInput } from "@/components/dictation";
 import { INSERT_FILE_PATHS_EVENT } from "@/components/path-input";
-import { readCourseAttachMode, useCourses } from "@/components/courses";
+import { readCourseAttachMode, resolveCourseAttachCourseId, useCourses } from "@/components/courses";
 
 export const BROWSER_NOTICE = "Local file paths can only be attached in the desktop app. You can paste a full path instead.";
 
@@ -17,7 +17,8 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 	className?: string;
 	onContentRoot?: (element: HTMLElement | null) => void;
 }) {
-	const { activeCourseId, mutate: mutateCourses, uploadFiles, getAttachTarget } = useCourses();
+	const { activeCourseId, membership, mutate: mutateCourses, uploadFiles, getAttachTarget, attachTarget } = useCourses();
+	const currentCourseId = resolveCourseAttachCourseId(attachTarget ?? getAttachTarget(), membership, activeCourseId);
 	const root = useRef<HTMLElement>(null);
 	useEffect(() => {
 		onContentRoot?.(root.current);
@@ -84,8 +85,10 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 					return appendToPrimaryInput(targetPaths.map(quoteFilePath).join(" "));
 				};
 
-				const mode = activeCourseId ? readCourseAttachMode(activeCourseId) : "session";
-				if (activeCourseId && mode === "course") {
+				const target = getAttachTarget() ?? attachTarget;
+				const dropCourseId = resolveCourseAttachCourseId(target, membership, activeCourseId);
+				const mode = dropCourseId ? readCourseAttachMode(dropCourseId) : "session";
+				if (dropCourseId && mode === "course") {
 					const filesToUpload = allFiles.filter((_, index) => {
 						try { return entries[index]?.webkitGetAsEntry?.()?.isDirectory !== true; }
 						catch { return true; }
@@ -95,11 +98,10 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 						setNotice("Only files can be added to course sources. Attach folders in Course settings.");
 						return;
 					}
-					const target = getAttachTarget();
 					const chatId = target?.kind === "chat" ? target.chatId : undefined;
 					setNoticeError(false);
 					setNotice("Adding to course sources…");
-					void uploadFiles(activeCourseId, filesToUpload, chatId)
+					void uploadFiles(dropCourseId, filesToUpload, chatId)
 						.then((res) => {
 							if (res.copied.length > 0) {
 								if (!insertPaths(res.copied)) {
@@ -150,8 +152,7 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 				}
 				setNoticeError(false);
 				setNotice(skipped ? "Some dropped items had no available file path." : "");
-				if (activeCourseId && filePaths.length > 0) {
-					const target = getAttachTarget();
+				if (dropCourseId && filePaths.length > 0) {
 					if (target?.kind === "chat") {
 						void mutateCourses({ action: "attach-session-files", chatId: target.chatId, paths: filePaths })
 							.catch((err: unknown) => {
@@ -170,7 +171,7 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 					<div className="flex max-w-md flex-col items-center gap-3">
 						<FileSymlinkIcon className="size-8 text-primary" aria-hidden />
 						<span className="font-ui text-sm">
-							{activeCourseId && readCourseAttachMode(activeCourseId) === "course"
+							{currentCourseId && readCourseAttachMode(currentCourseId) === "course"
 								? "Drop to add to course sources"
 								: window.lh?.getPathForFile
 									? "Drop to attach file paths"

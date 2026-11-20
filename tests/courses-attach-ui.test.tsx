@@ -221,19 +221,19 @@ describe("Paperclip attach mode toggle and flows", () => {
 		setDesktopBridge(backing);
 		const view: CoursesView = {
 			courses: [makeCourse("crs_1", "Vision"), makeCourse("crs_2", "Physics")],
-			membership: {},
+			membership: { chat_1: "crs_1", chat_2: "crs_2" },
 		};
 		globalThis.fetch = async (url) => {
 			if (url === "/api/courses") return Response.json(view);
 			return Response.json({});
 		};
 
-		// No course active -> toggle hidden
+		// Draft with no course active -> toggle hidden
 		localStorageStub.setItem(COURSE_FILTER_STORAGE_KEY, "all");
 		let value = "";
 		await mountWithProviders(
 			<div data-attachment-composer="">
-				<Composer busy={false} value={value} onChange={(v) => { value = v; }} onSend={() => {}} onStop={() => {}} canSend={false} chatId="chat_1" />
+				<Composer busy={false} value={value} onChange={(v) => { value = v; }} onSend={() => {}} onStop={() => {}} canSend={false} />
 			</div>,
 		);
 		await clickTestId("attach-files");
@@ -582,6 +582,119 @@ describe("Paperclip attach mode toggle and flows", () => {
 		assert.equal(uploads[0]!.get("courseId"), "crs_1");
 		assert.equal(uploads[0]!.get("chatId"), "chat_9");
 		assert.match(latestValue, /\/data\/course-files\/crs_1\/dropped\.pdf/);
+	});
+
+	it("open chat follows its membership course (ignoring sidebar filter) and a no-course chat hides toggle and skips attach/upload", async () => {
+		const backing = new Map<File, string>();
+		setDesktopBridge(backing);
+		// Sidebar selects crs_1 (with mode "course"), while open chat_2 belongs to crs_2 (mode "course" vs "session"), and chat_free has no course
+		localStorageStub.setItem(COURSE_FILTER_STORAGE_KEY, "course:crs_1");
+		localStorageStub.setItem(`${COURSE_ATTACH_MODE_STORAGE_PREFIX}crs_1`, "course");
+		localStorageStub.setItem(`${COURSE_ATTACH_MODE_STORAGE_PREFIX}crs_2`, "course");
+
+		const view: CoursesView = {
+			courses: [makeCourse("crs_1", "Vision"), makeCourse("crs_2", "Physics")],
+			membership: { chat_2: "crs_2" },
+		};
+		const posts: CourseRequest[] = [];
+		const uploads: Array<{ courseId: unknown; chatId: unknown }> = [];
+		globalThis.fetch = async (url, init) => {
+			if (url === "/api/courses" && init?.method === "POST") {
+				posts.push(JSON.parse(String(init.body)) as CourseRequest);
+				return Response.json(view);
+			}
+			if (url === "/api/courses") return Response.json(view);
+			if (url === "/api/courses/files" && init?.method === "POST") {
+				const form = init.body as FormData;
+				uploads.push({ courseId: form.get("courseId"), chatId: form.get("chatId") });
+				return Response.json({ ...view, copied: [`/data/course-files/${String(form.get("courseId"))}/f.md`] } satisfies CourseFilesResponse);
+			}
+			return Response.json({});
+		};
+
+		let latestValue = "";
+		function Harness({ openChatId }: { openChatId: string }) {
+			useCourseAttachTarget({ kind: "chat", chatId: openChatId });
+			const [val, setVal] = React.useState("");
+			latestValue = val;
+			return (
+				<FilePathDropZone>
+					<div data-attachment-composer="">
+						<Composer busy={false} value={val} onChange={setVal} onSend={() => {}} onStop={() => {}} canSend chatId={openChatId} />
+					</div>
+					<div data-testid="drop-zone">Drop</div>
+				</FilePathDropZone>
+			);
+		}
+
+		// 1) Open chat_2 (belongs to crs_2) while sidebar filter is crs_1
+		await mountWithProviders(<Harness openChatId="chat_2" />);
+		await clickTestId("attach-files");
+		assert.ok(document.querySelector('[data-testid="attach-mode-toggle"]'));
+		assert.equal(document.querySelector('[data-testid="attach-mode-course"]')!.getAttribute("aria-checked"), "true");
+		// Switching mode updates crs_2, NOT crs_1
+		await clickTestId("attach-mode-session");
+		assert.equal(localStorageStub.getItem(`${COURSE_ATTACH_MODE_STORAGE_PREFIX}crs_2`), "session");
+		assert.equal(localStorageStub.getItem(`${COURSE_ATTACH_MODE_STORAGE_PREFIX}crs_1`), "course");
+
+		// Set crs_2 back to "course" and verify both paperclip and drop target crs_2 (not crs_1)
+		await clickTestId("attach-mode-course");
+		await clickTestId("attach-files");
+		const fPick = new File(["p"], "picked.md");
+		backing.set(fPick, "/tmp/picked.md");
+		await pickInputFiles([fPick]);
+		assert.deepEqual(uploads, [{ courseId: "crs_2", chatId: "chat_2" }]);
+
+		const dropFile = async (file: File) => {
+			const dataTransfer = {
+				types: ["Files"],
+				files: Object.assign([file], { item: (i: number) => (i === 0 ? file : null) }),
+				items: [{ kind: "file", type: file.type, getAsFile: () => file, webkitGetAsEntry: () => ({ isDirectory: false, isFile: true }) }],
+				dropEffect: "none",
+			};
+			await act(async () => {
+				document.querySelector('[data-testid="drop-zone"]')!.dispatchEvent(
+					Object.assign(new dom.window.Event("dragenter", { bubbles: true, cancelable: true }), { dataTransfer }),
+				);
+			});
+			const indicator = document.querySelector('[data-testid="file-path-drop-indicator"]')?.textContent ?? "";
+			await act(async () => {
+				document.querySelector('[data-testid="drop-zone"]')!.dispatchEvent(
+					Object.assign(new dom.window.Event("drop", { bubbles: true, cancelable: true }), { dataTransfer }),
+				);
+			});
+			return indicator;
+		};
+
+		const fDrop = new File(["d"], "dropped.md");
+		backing.set(fDrop, "/tmp/dropped.md");
+		const crs2Indicator = await dropFile(fDrop);
+		assert.match(crs2Indicator, /Drop to add to course sources/);
+		assert.deepEqual(uploads, [
+			{ courseId: "crs_2", chatId: "chat_2" },
+			{ courseId: "crs_2", chatId: "chat_2" },
+		]);
+
+		// 2) Open chat_free (no course in membership) while sidebar filter is STILL crs_1 (mode "course")
+		await act(async () => { root!.unmount(); });
+		posts.length = 0;
+		uploads.length = 0;
+		await mountWithProviders(<Harness openChatId="chat_free" />);
+		await clickTestId("attach-files");
+		assert.equal(document.querySelector('[data-testid="attach-mode-toggle"]'), null, "no-course chat hides toggle");
+
+		const fFreePick = new File(["x"], "free-pick.md");
+		backing.set(fFreePick, "/tmp/free-pick.md");
+		await pickInputFiles([fFreePick]);
+		assert.match(latestValue, /\/tmp\/free-pick\.md/);
+
+		const fFreeDrop = new File(["y"], "free-drop.md");
+		backing.set(fFreeDrop, "/tmp/free-drop.md");
+		const freeIndicator = await dropFile(fFreeDrop);
+		assert.match(freeIndicator, /Drop to attach file paths/);
+		assert.match(latestValue, /\/tmp\/free-drop\.md/);
+		assert.deepEqual(posts.filter((p) => p.action === "attach-session-files"), [], "no-course chat makes no attach-session-files call");
+		assert.deepEqual(uploads, [], "no-course chat makes no upload call");
 	});
 });
 

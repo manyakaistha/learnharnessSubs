@@ -133,6 +133,19 @@ export function chatMatchesCourseFilter(
 	return cid === filter.courseId;
 }
 
+/** Resolve which course attachments belong to: an open chat uses its own
+ * course from membership (null if unassigned); drafts use activeCourseId. */
+export function resolveCourseAttachCourseId(
+	target: CourseAttachTarget | null,
+	membership: Readonly<Record<string, string>>,
+	activeCourseId: string | null,
+	explicitChatId?: string,
+): string | null {
+	const chatId = explicitChatId ?? (target?.kind === "chat" ? target.chatId : undefined);
+	if (chatId) return Object.hasOwn(membership, chatId) ? membership[chatId]! : null;
+	return activeCourseId;
+}
+
 export interface CoursesContextValue {
 	courses: CourseView[];
 	membership: Record<string, string>;
@@ -140,6 +153,7 @@ export interface CoursesContextValue {
 	filter: CourseFilter;
 	activeCourse: CourseView | null;
 	activeCourseId: string | null;
+	attachTarget: CourseAttachTarget | null;
 	revision: number;
 	setFilter: (next: CourseFilter) => void;
 	refresh: () => Promise<void>;
@@ -156,6 +170,7 @@ const DEFAULT_CONTEXT: CoursesContextValue = {
 	filter: ALL_FILTER,
 	activeCourse: null,
 	activeCourseId: null,
+	attachTarget: null,
 	revision: 0,
 	setFilter: () => {},
 	refresh: async () => {},
@@ -350,11 +365,16 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 		[courses, filter],
 	);
 
+	const [attachTarget, setAttachTarget] = useState<CourseAttachTarget | null>(null);
 	const attachTargetRef = useRef<CourseAttachTarget | null>(null);
 	const registerAttachTarget = useCallback((target: CourseAttachTarget) => {
 		attachTargetRef.current = target;
+		setAttachTarget(target);
 		return () => {
-			if (attachTargetRef.current === target) attachTargetRef.current = null;
+			if (attachTargetRef.current === target) {
+				attachTargetRef.current = null;
+				setAttachTarget(null);
+			}
 		};
 	}, []);
 	const getAttachTarget = useCallback(() => attachTargetRef.current, []);
@@ -376,6 +396,7 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 			filter,
 			activeCourse,
 			activeCourseId: activeCourseIdOf(filter),
+			attachTarget,
 			revision,
 			setFilter,
 			refresh: () => refresh(false),
@@ -384,7 +405,7 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 			registerAttachTarget,
 			getAttachTarget,
 		}),
-		[courses, membership, loaded, filter, activeCourse, revision, setFilter, refresh, mutate, uploadFiles, registerAttachTarget, getAttachTarget],
+		[courses, membership, loaded, filter, activeCourse, attachTarget, revision, setFilter, refresh, mutate, uploadFiles, registerAttachTarget, getAttachTarget],
 	);
 
 	return <CoursesContext.Provider value={value}>{children}</CoursesContext.Provider>;
