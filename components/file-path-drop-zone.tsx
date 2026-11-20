@@ -105,7 +105,8 @@ export function FilePathDropZone({ children, className, onContentRoot }: {
 						.then((res) => {
 							if (res.copied.length > 0) {
 								// Only into the session the drop started in (see sameAttachTarget).
-								if (!sameAttachTarget(target, getAttachTarget() ?? attachTarget)) {
+								// The live registry only: a stale captured target must not pass.
+								if (!sameAttachTarget(target, getAttachTarget())) {
 									setNoticeError(false);
 									setNotice("Added to course sources. Switch back to that session to reference the files.");
 									return;

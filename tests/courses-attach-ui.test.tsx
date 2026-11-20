@@ -378,6 +378,42 @@ describe("Paperclip attach mode toggle and flows", () => {
 		assert.match(err.textContent!, /Unsupported file type/);
 	});
 
+	it("an upload that completes after switching to another chat does not insert paths into the new chat", async () => {
+		const backing = new Map<File, string>();
+		setDesktopBridge(backing);
+		localStorageStub.setItem(COURSE_FILTER_STORAGE_KEY, "course:crs_1");
+		localStorageStub.setItem(`${COURSE_ATTACH_MODE_STORAGE_PREFIX}crs_1`, "course");
+		const view: CoursesView = { courses: [makeCourse("crs_1", "Vision")], membership: { chat_1: "crs_1", chat_2: "crs_1" } };
+		let resolveUpload!: (res: Response) => void;
+		globalThis.fetch = async (url, init) => {
+			if (url === "/api/courses") return Response.json(view);
+			if (url === "/api/courses/files" && init?.method === "POST") return new Promise<Response>((resolve) => { resolveUpload = resolve; });
+			return Response.json({});
+		};
+		let value = "";
+		let switchChat!: (id: string) => void;
+		function Harness() {
+			const [v, setV] = React.useState("");
+			const [chatId, setChatId] = React.useState("chat_1");
+			switchChat = setChatId;
+			value = v;
+			return (
+				<div data-attachment-composer="">
+					<Composer busy={false} value={v} onChange={setV} onSend={() => {}} onStop={() => {}} canSend chatId={chatId} />
+				</div>
+			);
+		}
+		await mountWithProviders(<Harness />);
+		const f = new File(["hello"], "slides.pdf", { type: "application/pdf" });
+		backing.set(f, "/Users/me/Downloads/slides.pdf");
+		await pickInputFiles([f]);
+		await act(async () => { switchChat("chat_2"); });
+		await act(async () => {
+			resolveUpload(Response.json({ ...view, copied: ["/data/course-files/crs_1/slides.pdf"] } satisfies CourseFilesResponse));
+		});
+		assert.equal(value, "", "chat_2's composer never receives chat_1's upload paths");
+	});
+
 	it("Draft flow (Home and NewSession) remembers session-only and copied paths and posts attach-session-files after chat creation", async () => {
 		const backing = new Map<File, string>();
 		setDesktopBridge(backing);

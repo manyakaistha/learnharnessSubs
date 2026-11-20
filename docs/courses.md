@@ -44,3 +44,7 @@ Owner-approved design (2026-11-20). Shared spec for every courses work package.
 - **"Extract files…":** gains a Course picker (No course + every course), defaulting to the active course. Choosing a course uses `POST /api/courses/files`. Choosing No course keeps today's notes import unchanged.
 - **Exclusions:** deleting (through source deletion) the knowledge of a file that lives in a course folder marks its `folderFiles` entry `excluded: true` instead of removing it. Scans skip excluded files. The panel lists them as "Excluded" with "Include again" (`include-file`), which clears the entry and rescans.
 - **Deleting a course:** with "Ungroup only", the managed copies stay on disk and move to No course. With "Also delete sessions and files", the managed folder is deleted too. Original files are never touched.
+
+## Threat model note
+- The LearnHarness data folder (including `course-files/`) is trusted local storage. Uploads refuse a linked managed folder, and before writing they verify where each new file landed (canonical folder and inode). A local process that can rewrite the data folder *between* that check and the write could still redirect bytes. Defending against an attacker who already controls the data folder is out of scope, as it is for every other ledger in it.
+- Source deletion is refused while any course-folder file is mid-extraction, across all of its chunks.

@@ -102,6 +102,9 @@ export function AttachFilesButton({
 	const controller = useOptionalInteractionLayers();
 	const { activeCourseId, membership, mutate: mutateCourses, uploadFiles, getAttachTarget, attachTarget } = useCourses();
 	const pickerRef = useRef<HTMLInputElement>(null);
+	// The composer's CURRENT chat, read after async work completes.
+	const chatIdRef = useRef(chatId);
+	chatIdRef.current = chatId;
 	const desktop = useDesktopPaths();
 	const buttonRef = useRef<HTMLButtonElement>(null);
 	const popupRef = useRef<HTMLDivElement>(null);
@@ -237,13 +240,15 @@ export function AttachFilesButton({
 		setNotice("Adding to course sources…");
 		const startEditor = editorRef.current;
 		const startTarget = getAttachTarget();
+		const startChatId = chatIdRef.current;
 		try {
 			const res = await uploadFiles(courseId, files, targetChatId);
 			setNotice("");
 			if (res.copied.length > 0) {
 				// Only into the composer the upload started from: switching chats
 				// meanwhile must not put paths (granted to the old chat) elsewhere.
-				if (startEditor?.isConnected && startEditor === editorRef.current && sameAttachTarget(startTarget, getAttachTarget())) {
+				if (startEditor?.isConnected && startEditor === editorRef.current
+					&& startChatId === chatIdRef.current && sameAttachTarget(startTarget, getAttachTarget())) {
 					startEditor.dispatchEvent(new CustomEvent(INSERT_FILE_PATHS_EVENT, { detail: res.copied }));
 					if (!targetChatId) stageDraft?.(res.copied);
 				} else {

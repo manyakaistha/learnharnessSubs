@@ -366,9 +366,12 @@ async function writeUniqueCourseFile(dir: string, realDir: string, filename: str
 			// a directory swapped for a link after validation must not receive data.
 			const real = await fsPromises.realpath(/* turbopackIgnore: true */ targetPath);
 			const [opened, onDisk] = await Promise.all([handle.stat(), fsPromises.stat(/* turbopackIgnore: true */ real)]);
-			if (path.dirname(real) !== realDir || opened.ino !== onDisk.ino || opened.dev !== onDisk.dev) {
+			const sameInode = opened.ino === onDisk.ino && opened.dev === onDisk.dev;
+			if (path.dirname(real) !== realDir || !sameInode) {
 				await handle.close();
-				await fsPromises.unlink(/* turbopackIgnore: true */ real).catch(() => undefined);
+				// Remove only the empty file THIS upload created, never whatever
+				// else now answers to that name.
+				if (sameInode) await fsPromises.unlink(/* turbopackIgnore: true */ real).catch(() => undefined);
 				throw new CourseInputError("The course's managed file folder changed while uploading. Try again.");
 			}
 			await handle.writeFile(bytes);

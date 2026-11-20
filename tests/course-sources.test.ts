@@ -673,3 +673,26 @@ it("a deletion that lands while a file is being read or decoded stops it before 
 	assert.deepEqual(seen, [], "the extractor never ran for the deleted file");
 	assert.equal(courseFileStatuses(courseId).find((s) => s.path === target)?.state, "excluded");
 });
+
+it("source deletion is refused while a course-folder file is mid-extraction (across chunks)", async () => {
+	const { deleteSources, SourceDeletionError } = await import("../src/server/source-deletion.ts");
+	const folder = path.join(root, "delete-blocked");
+	const file = writeText(path.join(folder, "long.md"), "# long");
+	const { courseId } = createCourseWithFolder("Blocked", folder);
+	const sourceId = courseFileSourceId(file);
+	stores.graphStore.upsertSource({ id: sourceId, filePath: "delete-blocked/long.md", importedAt: "2026-11-20T00:00:00Z" });
+	let release!: () => void;
+	const gate = new Promise<void>((r) => { release = r; });
+	let entered!: () => void;
+	const started = new Promise<void>((r) => { entered = r; });
+	setCourseExtractorForTests(async () => { entered(); await gate; return { nodes: 1, chains: 0 }; });
+	startCourseScan(courseId);
+	await started;
+	assert.throws(
+		() => deleteSources({ sourceIds: [sourceId], folderIds: [], deleteSessions: false }),
+		(err: unknown) => err instanceof SourceDeletionError && err.status === 409,
+	);
+	release();
+	while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+	assert.doesNotThrow(() => deleteSources({ sourceIds: [sourceId], folderIds: [], deleteSessions: false }));
+});

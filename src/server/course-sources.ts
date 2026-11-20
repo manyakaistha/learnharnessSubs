@@ -25,6 +25,8 @@ interface CourseSourcesRuntime {
 	pendingScans: Set<string>;
 	statuses: Map<string, CourseFileStatus[]>;
 	extractorOverride: CourseExtractor | null;
+	/** Sources whose whole extraction is in flight (all chunks). */
+	extracting: Set<string>;
 }
 
 function runtime(): CourseSourcesRuntime {
@@ -34,6 +36,7 @@ function runtime(): CourseSourcesRuntime {
 		pendingScans: new Set(),
 		statuses: new Map(),
 		extractorOverride: null,
+		extracting: new Set(),
 	});
 }
 
@@ -176,6 +179,9 @@ async function runExtractWithBusyRetry(
 		const state = isCourseActive(courseId, folderId);
 		if (!state) return "cancelled";
 		if (state.folderFiles[absPath]?.excluded) return "excluded";
+		// Held across every chunk, so source deletion refuses until the whole
+		// import settles (per-chunk statuses leave gaps between chunks).
+		runtime().extracting.add(input.sourceId);
 		try {
 			await extract(input);
 			return "ok";
@@ -185,6 +191,8 @@ async function runExtractWithBusyRetry(
 				continue;
 			}
 			throw err;
+		} finally {
+			runtime().extracting.delete(input.sourceId);
 		}
 	}
 }
@@ -523,6 +531,11 @@ export function courseFileStatuses(courseId: string): CourseFileStatus[] {
 		out.push({ path: absPath, folderId: rec.folderId, state: rec.excluded ? "excluded" : "extracted", ...(!rec.excluded && rec.notice ? { notice: rec.notice } : {}) });
 	}
 	return out;
+}
+
+/** True while any course-folder file is mid-extraction (source deletion waits). */
+export function courseSourcesExtracting(): boolean {
+	return runtime().extracting.size > 0;
 }
 
 export function courseScanning(courseId: string): boolean {
