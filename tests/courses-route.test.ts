@@ -730,8 +730,51 @@ it("POST /api/courses/files refuses a symlinked managed course folder and writes
 	const form = new FormData();
 	form.append("courseId", courseId);
 	form.append("files", new File(["# hi"], "notes.md"));
-	const res = await courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
-	assert.equal(res.status, 400);
-	assert.match((await res.json()).error, /managed file folder/);
+	const delRes = await courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	assert.equal(delRes.status, 400);
+	assert.match((await delRes.json()).error, /managed file folder/);
 	assert.deepEqual(fs.readdirSync(elsewhere), [], "nothing written through the link");
+});
+
+it("delete-sources keeps managed copies owned by another course and removes own, unassigned, and unrecorded copies", async () => {
+	setCourseExtractorForTests(async ({ sourceId, filePath }) => {
+		stores.graphStore.upsertSource({ id: sourceId, filePath, importedAt: "2026-11-20T00:00:00Z" });
+		return { nodes: 1, chains: 0 };
+	});
+
+	const cA = (await (await postCourse({ action: "create", name: "CourseA" })).json()).courses[0].id as string;
+	const cB = (await (await postCourse({ action: "create", name: "CourseB" })).json()).courses.find((c: { name: string }) => c.name === "CourseB").id as string;
+
+	const form = new FormData();
+	form.append("courseId", cA);
+	form.append("files", new File(["# own"], "own.md"));
+	form.append("files", new File(["# movedB"], "moved-b.md"));
+	form.append("files", new File(["# movedNone"], "moved-none.md"));
+	const upRes = await courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	assert.equal(upRes.status, 200);
+	const { copied } = (await upRes.json()) as { copied: string[] };
+	const [ownPath, movedBPath, movedNonePath] = copied as [string, string, string];
+	await waitForCourseScanForTests(cA);
+
+	const managedDirA = path.join(COURSE_FILES_DIR, cA);
+	const orphanPath = path.join(managedDirA, "orphan.md");
+	fs.writeFileSync(orphanPath, "# no folderFiles record");
+
+	const srcOwn = courseFileSourceId(ownPath);
+	const srcMovedB = courseFileSourceId(movedBPath);
+	const srcMovedNone = courseFileSourceId(movedNonePath);
+	await postCourse({ action: "assign", sourceId: srcMovedB, courseId: cB });
+	await postCourse({ action: "assign", sourceId: srcMovedNone, courseId: null });
+
+	const delRes = await postCourse({ action: "delete", id: cA, mode: "delete-sources" });
+	assert.equal(delRes.status, 200);
+
+	assert.equal(fs.existsSync(ownPath), false, "A's own managed file is deleted");
+	assert.equal(fs.existsSync(movedNonePath), false, "unassigned managed file is deleted");
+	assert.equal(fs.existsSync(orphanPath), false, "unrecorded file in managed dir is deleted");
+	assert.equal(fs.existsSync(movedBPath), true, "managed file moved to B must remain on disk");
+	assert.equal(fs.existsSync(managedDirA), true, "managed dir remains while anything stays inside");
+	assert.equal(stores.graphStore.readSources().some((s) => s.id === srcOwn), false);
+	assert.equal(stores.graphStore.readSources().some((s) => s.id === srcMovedB), true);
+	assert.equal(stores.courseStore.read().membership[srcMovedB], cB);
 });

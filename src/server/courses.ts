@@ -5,7 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { COURSE_FILES_DIR } from "../../config.ts";
 import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE } from "../../lib/notes-import-limits.ts";
-import type { CourseAction, CourseFilesResponse, CourseFilter, CourseFolder, CourseState, CoursesView } from "../core/contracts/courses.ts";
+import type {
+	CourseAction,
+	CourseFilesResponse,
+	CourseFilter,
+	CourseFolder,
+	CourseFolderFile,
+	CourseState,
+	CoursesView,
+} from "../core/contracts/courses.ts";
 import type { SourceDirectory } from "../core/source-organization.ts";
 import { isWithin } from "../agent/tools/file-access.ts";
 import { isProtectedSourcePath, isSensitivePath } from "../agent/tools/fs-shared.ts";
@@ -164,6 +172,7 @@ export function mutateCourses(raw: unknown): CoursesView {
 	}
 
 	let deletedManagedFolders: readonly CourseFolder[] = [];
+	let preDeleteState: CourseState | null = null;
 	if (action.action === "delete") {
 		const targetId = action.id;
 		const targetCourse = state.courses.find((c) => c.id === targetId);
@@ -173,6 +182,7 @@ export function mutateCourses(raw: unknown): CoursesView {
 		}
 		if (action.mode === "delete-sources") {
 			deletedManagedFolders = targetCourse.folders.filter((f) => f.managed);
+			preDeleteState = state;
 			const ownSources = ownSourcesOf(state, targetId);
 			if (ownSources.length > 0) {
 				deleteSources({ sourceIds: ownSources, folderIds: [], deleteSessions: true });
@@ -197,14 +207,20 @@ export function mutateCourses(raw: unknown): CoursesView {
 
 	stores.courseStore.write(next);
 	if (action.action === "delete") {
-		if (action.mode === "delete-sources") removeManagedCourseFolders(deletedManagedFolders);
+		if (action.mode === "delete-sources" && preDeleteState) {
+			removeManagedCourseFolders(deletedManagedFolders, action.id, preDeleteState);
+		}
 		forgetCourseStatuses(action.id);
 	}
 	if (action.action === "add-folder" || action.action === "include-file") startCourseScan(action.id);
 	return buildCoursesView(next);
 }
 
-function removeManagedCourseFolders(folders: readonly CourseFolder[]): void {
+function removeManagedCourseFolders(
+	folders: readonly CourseFolder[],
+	deletedCourseId: string,
+	preDeleteState: CourseState,
+): void {
 	if (folders.length === 0) return;
 	const managedRoot = path.resolve(COURSE_FILES_DIR);
 	let realRoot: string;
@@ -213,6 +229,41 @@ function removeManagedCourseFolders(folders: readonly CourseFolder[]): void {
 	} catch {
 		return;
 	}
+	const folderFileByPath = new Map<string, CourseFolderFile>();
+	for (const [recordedPath, rec] of Object.entries(preDeleteState.folderFiles)) {
+		folderFileByPath.set(path.resolve(recordedPath), rec);
+		try {
+			folderFileByPath.set(fs.realpathSync.native(/* turbopackIgnore: true */ recordedPath), rec);
+		} catch {
+			// Missing file keeps its lexical key only.
+		}
+	}
+	const shouldKeepFile = (realFilePath: string, lexicalFilePath: string): boolean => {
+		const rec = folderFileByPath.get(lexicalFilePath) ?? folderFileByPath.get(realFilePath);
+		if (!rec) return false;
+		const owner = courseOf(preDeleteState, rec.sourceId);
+		return owner !== null && owner !== deletedCourseId;
+	};
+	const pruneDirectory = (realDir: string, lexicalDir: string): boolean => {
+		let keptAnything = false;
+		const entries = fs.readdirSync(/* turbopackIgnore: true */ realDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const entryReal = path.join(/* turbopackIgnore: true */ realDir, entry.name);
+			const entryLexical = path.join(/* turbopackIgnore: true */ lexicalDir, entry.name);
+			if (entry.isDirectory()) {
+				if (pruneDirectory(entryReal, entryLexical)) keptAnything = true;
+			} else if (shouldKeepFile(entryReal, entryLexical)) {
+				keptAnything = true;
+			} else {
+				fs.rmSync(/* turbopackIgnore: true */ entryReal, { force: true });
+			}
+		}
+		if (!keptAnything) {
+			fs.rmdirSync(/* turbopackIgnore: true */ realDir);
+			return false;
+		}
+		return true;
+	};
 	for (const folder of folders) {
 		if (!folder.managed) continue;
 		const lexical = path.resolve(folder.path);
@@ -231,7 +282,7 @@ function removeManagedCourseFolders(folders: readonly CourseFolder[]): void {
 			continue;
 		}
 		if (realTarget === realRoot || !isWithin(realTarget, realRoot)) continue;
-		fs.rmSync(/* turbopackIgnore: true */ realTarget, { recursive: true, force: true });
+		pruneDirectory(realTarget, lexical);
 	}
 }
 
