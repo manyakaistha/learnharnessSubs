@@ -12,12 +12,14 @@
 import assert from "node:assert/strict";
 import { describe, it, it as test } from "node:test";
 import {
+	INHERITED_NODE_ALPHA,
 	applyClusterLabels,
 	arrowGeometry,
 	isImpNodeId,
 	boxBlurRound,
 	fitTransform,
 	labelAlpha,
+	nodeOpacity,
 	pickNearest,
 	wrapRegionLabel,
 	zoomRatioOf,
@@ -412,5 +414,14 @@ describe("applyClusterLabels (the label-only rename channel)", () => {
 			W, MAXL, measure,
 		);
 		assert.equal(changed, false);
+	});
+});
+
+describe("nodeOpacity (inherited course dimming)", () => {
+	it("dims inherited nodes to INHERITED_NODE_ALPHA and keeps own/unscoped nodes at 1", () => {
+		assert.ok(INHERITED_NODE_ALPHA > 0 && INHERITED_NODE_ALPHA < 0.6);
+		assert.equal(nodeOpacity({ inherited: true }), INHERITED_NODE_ALPHA);
+		assert.equal(nodeOpacity({ inherited: false }), 1);
+		assert.equal(nodeOpacity({}), 1);
 	});
 });
