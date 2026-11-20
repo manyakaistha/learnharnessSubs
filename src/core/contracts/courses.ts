@@ -10,6 +10,9 @@ export interface CourseFolder {
 	id: string;
 	path: string;
 	addedAt: string;
+	/** True for the LearnHarness-managed copy folder <data>/course-files/<courseId>/
+	 * that holds files copied in via "Add to course sources" or "Extract files…". */
+	managed?: boolean;
 }
 
 export interface Course {
@@ -31,6 +34,9 @@ export interface CourseFolderFile {
 	/** sha256 hex of the file bytes at the last successful extraction. */
 	sha256: string;
 	extractedAt: string;
+	/** Its knowledge was deleted by the learner: rescans skip the file until
+	 * "Include again" ({ action: "include-file" }) clears this entry. */
+	excluded?: boolean;
 }
 
 export interface CourseState {
@@ -40,6 +46,11 @@ export interface CourseState {
 	membership: Record<string, string>;
 	/** Absolute file path → bookkeeping. */
 	folderFiles: Record<string, CourseFolderFile>;
+	/** Chat id → absolute file paths attached "for this session only": readable
+	 * by that chat's agent on top of the course scope, listed first in its
+	 * prompt, never extracted or shared with other sessions. Optional on disk
+	 * (older files lack it); the parser fills {}. */
+	sessionFiles: Record<string, string[]>;
 }
 
 /** What the app is scoped to: everything, the unassigned sources, or one course. */
@@ -73,11 +84,16 @@ export type CourseAction =
 	| { action: "remove-folder"; id: string; folderId: string }
 	/** mode "ungroup": sources go to No course; "delete-sources": the caller
 	 * also deletes the course's own sources through source deletion. */
-	| { action: "delete"; id: string; mode: "ungroup" | "delete-sources" };
+	| { action: "delete"; id: string; mode: "ungroup" | "delete-sources" }
+	/** Clear an excluded file's bookkeeping so the next scan re-extracts it. */
+	| { action: "include-file"; id: string; path: string }
+	/** Grant files to one course chat for that session only (server validates
+	 * absolute existing files and that the chat belongs to a course). */
+	| { action: "attach-session-files"; chatId: string; paths: string[] };
 
 // ─── HTTP transport (GET/POST /api/courses) ──────────────────────────────────
 
-export type CourseFileState = "queued" | "extracting" | "extracted" | "failed";
+export type CourseFileState = "queued" | "extracting" | "extracted" | "failed" | "excluded";
 
 /** One supported file found in a course folder, for the course panel. */
 export interface CourseFileStatus {
@@ -107,3 +123,12 @@ export interface CoursesView {
 /** POST /api/courses bodies: a CourseAction, or { action: "rescan", id } which
  * starts a background scan of the course's folders (new/changed files). */
 export type CourseRequest = CourseAction | { action: "rescan"; id: string };
+
+/** POST /api/courses/files — multipart/form-data with field `courseId` and one
+ * or more `files` (each File's name is kept; clashes get " (2)", " (3)"…).
+ * Copies into the course's managed folder (created + attached on first use,
+ * `managed: true`), then starts a scan. Response: the CoursesView plus the
+ * absolute paths written, in request order. Errors: 400 { error }. */
+export interface CourseFilesResponse extends CoursesView {
+	copied: string[];
+}

@@ -80,3 +80,18 @@ it("projections narrow provenance so no out-of-scope session leaks into clusters
 	assert.deepEqual(free.nodes[0]!.provenance.map((p) => p.chatId), ["free"]);
 	assert.throws(() => parseCourseAction({ action: "assign", sourceId: "__proto__", courseId: null }), /Invalid source/);
 });
+
+it("include-file clears only an excluded entry; session files union per chat; older files without sessionFiles parse", () => {
+	let s = build();
+	s.folderFiles["/n/a.md"] = { courseId: "cv", folderId: "f", sourceId: "src_a", sha256: "x", extractedAt: "t", excluded: true };
+	s.folderFiles["/n/b.md"] = { courseId: "cv", folderId: "f", sourceId: "src_b", sha256: "y", extractedAt: "t" };
+	s = applyCourseAction(s, { action: "include-file", id: "cv", path: "/n/a.md" }, fresh());
+	assert.equal(s.folderFiles["/n/a.md"], undefined);
+	assert.throws(() => applyCourseAction(s, { action: "include-file", id: "cv", path: "/n/b.md" }, fresh()), /not excluded/);
+	s = applyCourseAction(s, parseCourseAction({ action: "attach-session-files", chatId: "c_cv", paths: ["/x/p.pdf", "/x/p.pdf"] }), fresh());
+	s = applyCourseAction(s, { action: "attach-session-files", chatId: "c_cv", paths: ["/x/q.md"] }, fresh());
+	assert.deepEqual(s.sessionFiles.c_cv, ["/x/p.pdf", "/x/q.md"]);
+	const { sessionFiles: _omit, ...legacy } = JSON.parse(JSON.stringify(s));
+	assert.deepEqual(parseCourseState(legacy).sessionFiles, {});
+	assert.throws(() => parseCourseAction({ action: "attach-session-files", chatId: "c", paths: [] }), /non-empty/);
+});

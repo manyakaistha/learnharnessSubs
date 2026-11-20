@@ -35,3 +35,11 @@ Owner-approved design (2026-11-20). Shared spec for every courses work package.
 - **Deleting while extracting:** "Also delete this course's sessions and files" is refused (409) while the course's folders are still extracting.
 - **Course graph provenance:** a course graph (and "No course") carries only in-scope provenance, so clusters and session lists never name an out-of-scope session.
 - **Layout positions:** they merge on save, so dragging nodes in a course view keeps every other node's position.
+
+## Attachments, Extract files, exclusions (owner-approved 2026-11-20)
+- **Paperclip toggle:** shown only when a course is active. It remembers the last choice per course in localStorage. The two options are "This session only" and "Add to course sources".
+  - **This session only:** the server records the absolute file paths in `sessionFiles[chatId]` (`attach-session-files`). That chat's agent may read them on top of the course scope. Its prompt lists them under "Attached for this session — rank these highest". They are never extracted or shared with other sessions. Deleting the chat drops them.
+  - **Add to course sources:** the files are uploaded to `POST /api/courses/files`. The server copies them into `<data>/course-files/<courseId>/`, creating that folder on first use and attaching it with `managed: true`. They are then extracted like any course-folder file. They are also granted to the current session and listed first in its prompt, the same as session-only files.
+- **"Extract files…":** gains a Course picker (No course + every course), defaulting to the active course. Choosing a course uses `POST /api/courses/files`. Choosing No course keeps today's notes import unchanged.
+- **Exclusions:** deleting (through source deletion) the knowledge of a file that lives in a course folder marks its `folderFiles` entry `excluded: true` instead of removing it. Scans skip excluded files. The panel lists them as "Excluded" with "Include again" (`include-file`), which clears the entry and rescans.
+- **Deleting a course:** with "Ungroup only", the managed copies stay on disk and move to No course. With "Also delete sessions and files", the managed folder is deleted too. Original files are never touched.

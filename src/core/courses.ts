@@ -4,7 +4,7 @@ import type { Course, CourseAction, CourseFilter, CourseFolder, CourseScope, Cou
 /** Pure course logic (contracts/courses.ts). No fs, no ids minted here:
  * callers pass fresh ids and timestamps, like source-organization.ts. */
 
-export const emptyCourseState = (): CourseState => ({ version: 1, courses: [], membership: {}, folderFiles: {} });
+export const emptyCourseState = (): CourseState => ({ version: 1, courses: [], membership: {}, folderFiles: {}, sessionFiles: {} });
 
 export const courseOf = (state: CourseState, sourceId: string): string | null =>
 	Object.hasOwn(state.membership, sourceId) ? state.membership[sourceId]! : null;
@@ -187,7 +187,8 @@ export function parseCourseState(raw: unknown): CourseState {
 			|| typeof c.createdAt !== "string" || !Array.isArray(c.includes) || !c.includes.every((i) => typeof i === "string")
 			|| !Array.isArray(c.folders)) return fail();
 		for (const f of c.folders as CourseFolder[]) {
-			if (!f || typeof f.id !== "string" || !f.id || typeof f.path !== "string" || !f.path || typeof f.addedAt !== "string") return fail();
+			if (!f || typeof f.id !== "string" || !f.id || typeof f.path !== "string" || !f.path || typeof f.addedAt !== "string"
+				|| (f.managed !== undefined && typeof f.managed !== "boolean")) return fail();
 		}
 		ids.add(c.id);
 	}
@@ -195,9 +196,17 @@ export function parseCourseState(raw: unknown): CourseState {
 	for (const v of Object.values(r.membership!)) if (typeof v !== "string" || !ids.has(v)) return fail();
 	for (const f of Object.values(r.folderFiles!)) {
 		if (!f || typeof f !== "object" || typeof f.courseId !== "string" || typeof f.folderId !== "string"
-			|| typeof f.sourceId !== "string" || typeof f.sha256 !== "string" || typeof f.extractedAt !== "string") return fail();
+			|| typeof f.sourceId !== "string" || typeof f.sha256 !== "string" || typeof f.extractedAt !== "string"
+			|| (f.excluded !== undefined && typeof f.excluded !== "boolean")) return fail();
 	}
-	const state = r as CourseState;
+	const sessionFiles = (r as { sessionFiles?: unknown }).sessionFiles;
+	if (sessionFiles !== undefined) {
+		if (!isMap(sessionFiles)) return fail();
+		for (const list of Object.values(sessionFiles as Record<string, unknown>)) {
+			if (!Array.isArray(list) || !list.every((p) => typeof p === "string" && p)) return fail();
+		}
+	}
+	const state = { ...(r as CourseState), sessionFiles: (sessionFiles ?? {}) as Record<string, string[]> };
 	for (const c of state.courses) if (includesWouldCycle({ ...state, courses: state.courses.map((x) => x.id === c.id ? { ...x, includes: [] } : x) }, c.id, c.includes)) return fail();
 	return state;
 }
@@ -229,6 +238,14 @@ export function parseCourseAction(raw: unknown): CourseAction {
 		case "delete":
 			if (r.mode !== "ungroup" && r.mode !== "delete-sources") throw new Error("Invalid delete mode.");
 			return { action: "delete", id: str("id", "Course ID"), mode: r.mode };
+		case "include-file": return { action: "include-file", id: str("id", "Course ID"), path: str("path", "File path") };
+		case "attach-session-files": {
+			const chatId = str("chatId", "Chat ID");
+			if (chatId === "__proto__" || chatId === "constructor" || chatId === "prototype") throw new Error("Invalid chat ID.");
+			const v = r.paths;
+			if (!Array.isArray(v) || v.length === 0 || !v.every((x) => typeof x === "string" && x.trim())) throw new Error("Paths must be a non-empty list of file paths.");
+			return { action: "attach-session-files", chatId, paths: [...new Set((v as string[]).map((x) => x.trim()))] };
+		}
 		default: throw new Error("Unknown course action.");
 	}
 }
@@ -286,6 +303,18 @@ export function applyCourseAction(state: CourseState, action: CourseAction, fres
 			for (const c of next.courses) c.includes = c.includes.filter((i) => i !== action.id);
 			for (const [source, c] of Object.entries(next.membership)) if (c === action.id) delete next.membership[source];
 			for (const [file, rec] of Object.entries(next.folderFiles)) if (rec.courseId === action.id) delete next.folderFiles[file];
+			return next;
+		}
+		case "include-file": {
+			course(action.id);
+			const rec = Object.hasOwn(next.folderFiles, action.path) ? next.folderFiles[action.path] : undefined;
+			if (!rec || rec.courseId !== action.id || !rec.excluded) throw new Error("This file is not excluded from the course.");
+			delete next.folderFiles[action.path];
+			return next;
+		}
+		case "attach-session-files": {
+			const existing = Object.hasOwn(next.sessionFiles, action.chatId) ? next.sessionFiles[action.chatId]! : [];
+			next.sessionFiles[action.chatId] = [...new Set([...existing, ...action.paths])];
 			return next;
 		}
 	}

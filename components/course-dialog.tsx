@@ -23,6 +23,7 @@ const FILE_STATE_LABEL: Record<CourseFileState, string> = {
 	extracting: "Extracting…",
 	extracted: "Extracted",
 	failed: "Failed",
+	excluded: "Excluded",
 };
 
 /** Pure confirm dialog body for deleting a course — exported for SSR/DOM tests. */
