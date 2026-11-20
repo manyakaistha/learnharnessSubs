@@ -83,7 +83,7 @@ it("initial scan extracts supported files sequentially, skips unsupported/dot-di
 		active++;
 		maxActive = Math.max(maxActive, active);
 		seenCalls.push(input);
-		await new Promise((r) => setTimeout(r, 15));
+		await Promise.resolve();
 		active--;
 		return { nodes: 1, chains: 0 };
 	});
@@ -95,7 +95,6 @@ it("initial scan extracts supported files sequentially, skips unsupported/dot-di
 		// finds every file unchanged and extracts nothing more).
 		startCourseScan(courseId);
 
-		await waitForCourseScanForTests(courseId);
 		while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
 	} finally {
 		unsub();
@@ -321,20 +320,27 @@ it("never follows symlinks outside the folder and dedupes links to one file", as
 it("a scan requested while one runs triggers exactly one follow-up pass", async () => {
 	const folder = path.join(root, "pending-course");
 	writeText(path.join(folder, "a.md"), "# a");
+	let enteredFirst!: () => void;
+	const firstEntered = new Promise<void>((r) => { enteredFirst = r; });
 	let release!: () => void;
 	const gate = new Promise<void>((r) => { release = r; });
 	const seen: string[] = [];
-	setCourseExtractorForTests(async ({ filePath }) => { seen.push(filePath); if (seen.length === 1) await gate; return { nodes: 1, chains: 0 }; });
+	setCourseExtractorForTests(async ({ filePath }) => {
+		seen.push(filePath);
+		if (seen.length === 1) {
+			enteredFirst();
+			await gate;
+		}
+		return { nodes: 1, chains: 0 };
+	});
 	const { courseId } = createCourseWithFolder("Pending", folder);
 	startCourseScan(courseId);
-	await new Promise((r) => setTimeout(r, 50));
+	await firstEntered;
 	writeText(path.join(folder, "b.md"), "# b");
 	startCourseScan(courseId);
 	startCourseScan(courseId);
 	release();
-	await waitForCourseScanForTests(courseId);
-	await new Promise((r) => setTimeout(r, 20));
-	await waitForCourseScanForTests(courseId);
+	while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
 	assert.deepEqual(seen, ["pending-course/a.md", "pending-course/b.md"]);
 	assert.equal(courseScanning(courseId), false);
 });
