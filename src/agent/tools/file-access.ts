@@ -70,6 +70,8 @@ export function realSourcePath(absolute: string): string {
 	}
 }
 
+const policyFileRoots = new WeakMap<ResolvedFileAccessPolicy, ReadonlySet<string>>();
+
 /** One snapshot per tool call, shared by every root in a multi-root search.
  * Unmounted/unreadable roots never become a default-home fallback. */
 export function resolvePolicy(policy: FileAccessPolicy = fileAccessPolicy()): ResolvedFileAccessPolicy {
@@ -77,17 +79,26 @@ export function resolvePolicy(policy: FileAccessPolicy = fileAccessPolicy()): Re
 	if (!policy.restricted) return { restricted: false, folders: [], unavailable: [] };
 	const folders: string[] = [];
 	const unavailable: string[] = [];
+	const fileRoots = new Set<string>();
 	for (const folder of policy.folders) {
 		try {
 			const real = fs.realpathSync.native(/* turbopackIgnore: true */ folder);
-			if (!fs.statSync(/* turbopackIgnore: true */ real).isDirectory()) throw new Error("not a directory");
-			fs.accessSync(/* turbopackIgnore: true */ real, fs.constants.R_OK | fs.constants.X_OK);
+			const stat = fs.statSync(/* turbopackIgnore: true */ real);
+			if (!stat.isDirectory() && !stat.isFile()) throw new Error("not a directory or file");
+			fs.accessSync(/* turbopackIgnore: true */ real, stat.isDirectory() ? fs.constants.R_OK | fs.constants.X_OK : fs.constants.R_OK);
+			if (stat.isFile()) fileRoots.add(real);
 			if (folders.some((root) => isWithin(real, root))) continue;
 			for (let i = folders.length - 1; i >= 0; i--) if (isWithin(folders[i]!, real)) folders.splice(i, 1);
 			folders.push(real);
 		} catch { unavailable.push(`Unavailable allowed folder: ${folder}`); }
 	}
-	return { restricted: true, folders, unavailable };
+	const resolved: ResolvedFileAccessPolicy = { restricted: true, folders, unavailable };
+	if (fileRoots.size > 0) {
+		// Retain only surviving file roots (nested files collapsed under a dir root are covered by the dir).
+		const surviving = new Set(folders.filter((f) => fileRoots.has(f)));
+		if (surviving.size > 0) policyFileRoots.set(resolved, surviving);
+	}
+	return resolved;
 }
 
 export function resolvePolicyForChat(chatId?: string): ResolvedFileAccessPolicy {
@@ -99,7 +110,10 @@ export function resolvePolicyForChat(chatId?: string): ResolvedFileAccessPolicy 
  * fs-shared runs its mandatory named AND canonical denials before this gate. */
 export function guardSourcePath(absolute: string, policy: ResolvedFileAccessPolicy = resolvePolicy()): string {
 	const real = realSourcePath(absolute);
-	if (policy.restricted && !policy.folders.some((folder) => isWithin(real, folder))) {
+	const fileRoots = policyFileRoots.get(policy);
+	const allowed = (folder: string) =>
+		fileRoots?.has(folder) ? comparisonPath(real) === comparisonPath(folder) : isWithin(real, folder);
+	if (policy.restricted && !policy.folders.some(allowed)) {
 		throw new Error(
 			`Access denied: ${absolute} is outside the allowed folders, or no allowed folders are available. ` +
 			"Use ls without a path to list allowed folders, or ask the learner to adjust File access in Settings → Agent → Tools.",

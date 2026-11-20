@@ -75,8 +75,11 @@ export function createGrepTool(chatId?: string): AgentTool<typeof grepInput> {
 				try { stat = await fs.stat(searchPath); }
 				catch { throw new Error(`Path not found: ${searchPath}`); }
 				const isDirectory = stat.isDirectory();
-				if (!isDirectory) files.push({ filePath: searchPath, searchPath, isDirectory });
-				else {
+				if (!isDirectory) {
+					if (!multiRoot || !input.glob || matchGlob(path.basename(searchPath), input.glob)) {
+						files.push({ filePath: searchPath, searchPath, isDirectory });
+					}
+				} else {
 					const result = await walkFiles(searchPath, (filePath) => {
 						if (input.glob && !matchGlob(path.relative(searchPath, filePath).split(path.sep).join("/"), input.glob)) return false;
 						files.push({ filePath, searchPath, isDirectory });

@@ -14,6 +14,11 @@ const { courseStore } = await import("../src/store/courses.ts");
 const { fileAccessPolicy } = await import("../src/server/file-access.ts");
 const { applyCourseAction, coursePromptSegment, emptyCourseState, resolveCourseScope } = await import("../src/core/courses.ts");
 const { graphSessionIndex, graphSessionPropositions } = await import("../src/core/graph.ts");
+const { setFileAccessPolicy, resolvePolicy, guardSourcePath } = await import("../src/agent/tools/file-access.ts");
+const { createReadTool } = await import("../src/agent/tools/read.ts");
+const { createLsTool } = await import("../src/agent/tools/ls.ts");
+const { createFindTool } = await import("../src/agent/tools/find.ts");
+const { createGrepTool } = await import("../src/agent/tools/grep.ts");
 
 const cvDir = fs.mkdtempSync(path.join(root, "cv-"));
 const vlaDir = fs.mkdtempSync(path.join(root, "vla-"));
@@ -54,4 +59,68 @@ it("prober graph session index is limited to the course scope, own sessions firs
 	assert.deepEqual(graphSessionIndex(deps, scope).map((e) => e.id), ["chat_vla", "chat_cv"], "own first despite older activity; out-of-scope dropped");
 	assert.deepEqual(graphSessionIndex(deps).map((e) => e.id).sort(), ["chat_cv", "chat_free", "chat_vla"], "no scope = global");
 	assert.deepEqual(graphSessionPropositions(deps, "chat_free", scope), []);
+});
+
+it("sessionFiles grants access for that chat only and works with read, ls, find, and grep without breaking defaults", async () => {
+	const outsideDir = fs.mkdtempSync(path.join(root, "outside-"));
+	const attachedFile = path.join(outsideDir, "handout.md");
+	const siblingFile = path.join(outsideDir, "secret.md");
+	const cvNote = path.join(cvDir, "cv-note.md");
+	fs.writeFileSync(attachedFile, "Session handout needle\n");
+	fs.writeFileSync(siblingFile, "Sibling secret needle\n");
+	fs.writeFileSync(cvNote, "CV folder needle\n");
+
+	let withSession = applyCourseAction(s, { action: "attach-session-files", chatId: "chat_cv", paths: [attachedFile] }, { id: "", at: "t" });
+	withSession = applyCourseAction(withSession, { action: "attach-session-files", chatId: "chat_empty", paths: [attachedFile] }, { id: "", at: "t" });
+	// An entry for a no-course chat must never affect its policy
+	withSession = applyCourseAction(withSession, { action: "attach-session-files", chatId: "chat_free", paths: [attachedFile] }, { id: "", at: "t" });
+	courseStore.write(withSession);
+	setFileAccessPolicy(fileAccessPolicy);
+
+	try {
+		assert.deepEqual(fileAccessPolicy("chat_cv"), { restricted: true, folders: [path.resolve(cvDir), path.resolve(attachedFile)] });
+		assert.deepEqual(fileAccessPolicy("chat_vla"), { restricted: true, folders: [path.resolve(vlaDir), path.resolve(cvDir)] });
+		assert.deepEqual(fileAccessPolicy("chat_empty"), { restricted: true, folders: [path.resolve(attachedFile)] });
+		assert.deepEqual(fileAccessPolicy("chat_free"), fileAccessPolicy(), "no-course chat ignores sessionFiles");
+
+		const resolved = resolvePolicy(fileAccessPolicy("chat_cv"));
+		const realAttached = fs.realpathSync.native(attachedFile);
+		assert.equal(guardSourcePath(attachedFile, resolved), realAttached);
+		assert.throws(() => guardSourcePath(siblingFile, resolved), /Access denied/);
+		assert.throws(() => guardSourcePath(path.join(attachedFile, "child"), resolved), /Access denied/);
+
+		// Tools for chat_cv: read attached file, deny sibling; ls/find/grep with no path work when a root is a file
+		const read = createReadTool(undefined, "chat_cv");
+		const ls = createLsTool("chat_cv");
+		const find = createFindTool("chat_cv");
+		const grep = createGrepTool("chat_cv");
+
+		const readRes = await read.execute!("1", { path: attachedFile });
+		assert.match((readRes.content[0] as { text: string }).text, /Session handout needle/);
+		await assert.rejects(read.execute!("2", { path: siblingFile }), /Access denied/);
+		await assert.rejects(createReadTool(undefined, "chat_vla").execute!("3", { path: attachedFile }), /Access denied/);
+
+		const lsOut = (await ls.execute!("4", {})).content[0] as { text: string };
+		assert.ok(lsOut.text.includes(realAttached));
+		await assert.rejects(ls.execute!("4b", { path: attachedFile }), /Not a directory/);
+
+		const findOut = (await find.execute!("5", { pattern: "*.md" })).content[0] as { text: string };
+		assert.ok(findOut.text.includes(realAttached));
+		assert.ok(findOut.text.includes(fs.realpathSync.native(cvNote)));
+		assert.ok(!findOut.text.includes(fs.realpathSync.native(siblingFile)));
+
+		const grepOut = (await grep.execute!("6", { pattern: "needle" })).content[0] as { text: string };
+		assert.ok(grepOut.text.includes(`${realAttached}:1: Session handout needle`));
+		assert.ok(grepOut.text.includes(`${fs.realpathSync.native(cvNote)}:1: CV folder needle`));
+		assert.ok(!grepOut.text.includes("Sibling secret"));
+
+		// Course with ONLY a file root (chat_empty) also works for ls/find/grep with no path
+		const emptyFind = (await createFindTool("chat_empty").execute!("7", { pattern: "*.md" })).content[0] as { text: string };
+		assert.equal(emptyFind.text, realAttached);
+		const emptyGrep = (await createGrepTool("chat_empty").execute!("8", { pattern: "needle", glob: "*.txt" })).content[0] as { text: string };
+		assert.equal(emptyGrep.text, "No matches found");
+	} finally {
+		setFileAccessPolicy(fileAccessPolicy);
+		courseStore.write(s);
+	}
 });
