@@ -560,6 +560,9 @@ export function SessionsSidebar() {
 	   coexist: hovering doesn't claim, a click or an open clears the
 	   selection. */
 	const [kbdIndex, setKbdIndex] = useState<number | null>(null);
+	useEffect(() => {
+		setKbdIndex(null);
+	}, [courseFilter]);
 	const searchRef = useRef<HTMLInputElement>(null);
 	const listRef = useRef<HTMLDivElement>(null);
 

@@ -244,7 +244,7 @@ export function DraftShell({
 
 export function NewSession({ initialConfigured, mode = "teach" }: { initialConfigured: boolean; mode?: "teach" | "practice" }) {
 	const router = useRouter();
-	const { filter, activeCourseId, revision } = useCourses();
+	const { filter, activeCourseId, revision, refresh: refreshCourses } = useCourses();
 	const courseQuery = courseQueryParam(filter);
 	const [text, setText] = useState("");
 	/* The draft MIRROR ("nothing gets lost" round, 2026-10-01): the shell's
@@ -272,22 +272,40 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const snapshotScopeRef = useRef<string>("");
+	const fetchSnapshot = useCallback(
+		(scopeKey: string) =>
+			fetch(`/api/graph${courseQuery}`)
+				.then((r) => {
+					if (!r.ok) {
+						if (r.status === 404 && filter.kind === "course") void refreshCourses();
+						throw new Error(`Graph fetch failed (${r.status})`);
+					}
+					return r.json() as Promise<GraphSnapshot>;
+				})
+				.then((snap) => {
+					snapshotScopeRef.current = scopeKey;
+					setSnapshot(snap);
+					return snap;
+				}),
+		[courseQuery, filter.kind, refreshCourses],
+	);
 	useEffect(() => {
-		if (snapshotScopeRef.current !== `${courseQuery}:${revision}`) {
+		const scopeKey = `${courseQuery}:${revision}`;
+		if (snapshotScopeRef.current === scopeKey) return;
+		if (pickerOpen) {
+			void fetchSnapshot(scopeKey).catch(() => {});
+		} else {
 			setSnapshot(null);
 		}
-	}, [courseQuery, revision]);
+	}, [courseQuery, revision, pickerOpen, fetchSnapshot]);
 	const openPicker = () => {
 		const scopeKey = `${courseQuery}:${revision}`;
 		if (snapshot && snapshotScopeRef.current === scopeKey) {
 			setPickerOpen(true);
 			return;
 		}
-		void fetch(`/api/graph${courseQuery}`)
-			.then((r) => r.json() as Promise<GraphSnapshot>)
-			.then((snap) => {
-				snapshotScopeRef.current = scopeKey;
-				setSnapshot(snap);
+		void fetchSnapshot(scopeKey)
+			.then(() => {
 				setPickerOpen(true);
 			})
 			.catch(() => {
@@ -331,15 +349,17 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined,
 			starterRef.current, JSON.stringify(catalog?.slots.strong), activeCourseId)
 			.then((target) => {
-				if (target) router.push(target);
-				else { startingRef.current = false; setBusy(false); }
+				if (target) {
+					if (activeCourseId) void refreshCourses();
+					router.push(target);
+				} else { startingRef.current = false; setBusy(false); }
 			})
 			.catch(() => {
 				startingRef.current = false;
 				setBusy(false);
 				setStartError(true);
 			});
-	}, [router, configured, zeroKeys, catalog, mode, activeCourseId]);
+	}, [router, configured, zeroKeys, catalog, mode, activeCourseId, refreshCourses]);
 
 	return (
 		<>

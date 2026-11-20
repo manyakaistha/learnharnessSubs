@@ -159,6 +159,7 @@ export function DeleteCourseDialog({
 			await onDelete(mode);
 		} catch (error) {
 			setFailure(error instanceof Error ? error.message : String(error));
+		} finally {
 			setBusy(false);
 		}
 	};
@@ -226,6 +227,7 @@ export function NewCourseDialog({
 			onClose();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
+		} finally {
 			setBusy(false);
 		}
 	};
@@ -511,7 +513,7 @@ export function CoursePanelBody({
 							<button
 								type="button"
 								data-testid="course-rescan"
-								disabled={rescanBusy}
+								disabled={rescanBusy || course.scanning}
 								onClick={onRescan}
 								className="flex items-center gap-1 rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
 							>
@@ -586,8 +588,9 @@ export function CoursePanelBody({
 												type="button"
 												aria-label={`Remove ${folder.path}`}
 												data-testid={`course-folder-remove-${folder.id}`}
+												disabled={folderBusy}
 												onClick={() => onRemoveFolder(folder.id)}
-												className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+												className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
 											>
 												Remove
 											</button>
@@ -640,7 +643,7 @@ export function CoursePanelDialog({
 	onClose: () => void;
 	onDeletedCourse?: (mode: CourseDeleteMode, ownSourceIds: string[]) => void;
 }) {
-	const { courses, mutate } = useCourses();
+	const { courses, loaded, mutate } = useCourses();
 	const course = courseId ? courses.find((c) => c.id === courseId) ?? null : null;
 
 	const [renameDraft, setRenameDraft] = useState("");
@@ -671,6 +674,10 @@ export function CoursePanelDialog({
 	useEffect(() => {
 		if (!open) setDeleteOpen(false);
 	}, [open]);
+
+	useEffect(() => {
+		if (open && loaded && !course) onClose();
+	}, [open, loaded, course, onClose]);
 
 	if (!open || !course) return null;
 
@@ -731,11 +738,15 @@ export function CoursePanelDialog({
 	};
 
 	const handleRemoveFolder = async (folderId: string) => {
+		if (folderBusy) return;
+		setFolderBusy(true);
 		setFolderError("");
 		try {
 			await mutate({ action: "remove-folder", id: course.id, folderId });
 		} catch (err) {
 			setFolderError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setFolderBusy(false);
 		}
 	};
 

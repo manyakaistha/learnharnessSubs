@@ -1003,8 +1003,10 @@ export function GraphView({
 	const canvasRef = useRef<HTMLCanvasElement | null>(null);
 	const cardRef = useRef<HTMLDivElement | null>(null);
 	const { resolvedMode, colors } = useAppearance();
-	const { filter, courses, activeCourse, revision: coursesRevision } = useCourses();
+	const { filter, courses, activeCourse, revision: coursesRevision, refresh: refreshCourses } = useCourses();
 	const courseQuery = courseQueryParam(filter);
+	const courseRef = useRef({ kind: filter.kind, refresh: refreshCourses });
+	courseRef.current = { kind: filter.kind, refresh: refreshCourses };
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const [selected, setSelected] = useState<Selection | null>(null);
 	// The latest snapshot for the renderer's click callbacks (they are
@@ -1118,7 +1120,13 @@ export function GraphView({
 	useEffect(() => {
 		let cancelled = false;
 		fetch(`/api/graph${courseQuery}`)
-			.then((res) => res.json() as Promise<GraphSnapshot>)
+			.then((res) => {
+				if (!res.ok) {
+					if (res.status === 404 && courseRef.current.kind === "course") void courseRef.current.refresh();
+					throw new Error(`Graph fetch failed (${res.status})`);
+				}
+				return res.json() as Promise<GraphSnapshot>;
+			})
 			.then((data) => {
 				if (!cancelled) setSnapshot(data);
 			})

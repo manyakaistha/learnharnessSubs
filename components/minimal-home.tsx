@@ -18,7 +18,7 @@
  * The practice pick flow mirrors GraphView's contract verbatim (home
  * lifts the pick set; the chip opens the overlay in select mode).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ListTreeIcon } from "lucide-react";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { GraphCostControl } from "@/components/graph-view.tsx";
@@ -107,8 +107,10 @@ export function MinimalHome({
 	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[]) => void;
 	onChainSelectClose?: () => void;
 }) {
-	const { filter, courses, membership, loaded: coursesLoaded, activeCourse, revision: coursesRevision } = useCourses();
+	const { filter, courses, membership, loaded: coursesLoaded, activeCourse, revision: coursesRevision, refresh: refreshCourses } = useCourses();
 	const courseQuery = courseQueryParam(filter);
+	const courseRef = useRef({ kind: filter.kind, refresh: refreshCourses });
+	courseRef.current = { kind: filter.kind, refresh: refreshCourses };
 	const hub = useNotifyHub();
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const [costs, setCosts] = useState<GraphCostSummary | null>(null);
@@ -117,16 +119,30 @@ export function MinimalHome({
 
 	const readState = useCallback(() => {
 		fetch(`/api/graph${courseQuery}`)
-			.then((res) => res.json() as Promise<GraphSnapshot>)
+			.then((res) => {
+				if (!res.ok) {
+					if (res.status === 404 && courseRef.current.kind === "course") void courseRef.current.refresh();
+					throw new Error(`Graph fetch failed (${res.status})`);
+				}
+				return res.json() as Promise<GraphSnapshot>;
+			})
 			.then(setSnapshot)
 			.catch(() => {});
 		fetch("/api/graph/costs")
-			.then((res) => res.json() as Promise<GraphCostSummary>)
+			.then((res) => {
+				if (!res.ok) throw new Error(`Costs fetch failed (${res.status})`);
+				return res.json() as Promise<GraphCostSummary>;
+			})
 			.then(setCosts)
 			.catch(() => {});
 		fetch("/api/chats")
-			.then((res) => res.json() as Promise<{ chats: ChatListItem[] }>)
-			.then((body) => setChats(body.chats))
+			.then((res) => {
+				if (!res.ok) throw new Error(`Chats fetch failed (${res.status})`);
+				return res.json() as Promise<{ chats: ChatListItem[] }>;
+			})
+			.then((body) => {
+				if (Array.isArray(body?.chats)) setChats(body.chats);
+			})
 			.catch(() => {});
 	}, [courseQuery]);
 	useEffect(() => {
@@ -137,9 +153,11 @@ export function MinimalHome({
 	useEffect(() => {
 		if (!hub) return;
 		const offChats = hub.subscribe("chats-changed", readState);
+		const offSources = hub.subscribe("sources-changed", readState);
 		const offCourses = hub.subscribe("courses-changed", readState);
 		return () => {
 			offChats();
+			offSources();
 			offCourses();
 		};
 	}, [hub, readState]);
@@ -155,7 +173,7 @@ export function MinimalHome({
 	const { importing, onImportFiles } = notesImport;
 
 	const filteredChats = chats.filter((c) => chatMatchesCourseFilter(c, filter, membership, courses, coursesLoaded));
-	const teachSessions = filteredChats.filter((c) => c.kind === "teach").length;
+	const teachSessions = filteredChats.filter((c) => (c.kind ?? "teach") === "teach").length;
 	const practiceSessions = filteredChats.filter((c) => c.kind === "practice").length;
 
 	return (

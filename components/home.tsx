@@ -39,7 +39,7 @@ export function Home({
 	rendering?: boolean;
 }) {
 	const controller = useOptionalInteractionLayers();
-	const { activeCourseId } = useCourses();
+	const { activeCourseId, refresh: refreshCourses } = useCourses();
 	const router = useRouter();
 	const pathname = usePathname();
 	const bodyRef = useRef<HTMLDivElement>(null);
@@ -160,6 +160,7 @@ export function Home({
 				...(mode === "practice" ? { kind: "practice" } : {}),
 				...(practiceProps.length > 0 ? { graphContext: { propositions: practiceProps } } : {}),
 			}, fetch, JSON.stringify(catalog?.slots.strong));
+			if (activeCourseId) void refreshCourses();
 			router.push(target);
 		} catch {
 			startingRef.current = false;

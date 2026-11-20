@@ -161,18 +161,36 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const refreshInFlightRef = useRef<Promise<void> | null>(null);
+	const pendingRefreshRef = useRef<{ bump: boolean } | null>(null);
 	const refresh = useCallback(async (bumpRevision = false) => {
-		if (refreshInFlightRef.current) return refreshInFlightRef.current;
+		if (refreshInFlightRef.current) {
+			pendingRefreshRef.current = {
+				bump: (pendingRefreshRef.current?.bump ?? false) || bumpRevision,
+			};
+			return refreshInFlightRef.current;
+		}
 		const run = (async () => {
+			let nextBump: boolean | null = bumpRevision;
 			try {
-				const res = await fetch("/api/courses", { cache: "no-store" });
-				if (!res.ok) return;
-				const data = (await res.json()) as CoursesView;
-				if (Array.isArray(data?.courses) && data.membership && typeof data.membership === "object") {
-					applyView(data, bumpRevision);
+				while (nextBump !== null) {
+					const bump = nextBump;
+					nextBump = null;
+					try {
+						const res = await fetch("/api/courses", { cache: "no-store" });
+						if (res.ok) {
+							const data = (await res.json()) as CoursesView;
+							if (Array.isArray(data?.courses) && data.membership && typeof data.membership === "object") {
+								applyView(data, bump);
+							}
+						}
+					} catch {
+						// transient failure keeps last state
+					}
+					if (pendingRefreshRef.current) {
+						nextBump = pendingRefreshRef.current.bump;
+						pendingRefreshRef.current = null;
+					}
 				}
-			} catch {
-				// transient failure keeps last state
 			} finally {
 				refreshInFlightRef.current = null;
 			}

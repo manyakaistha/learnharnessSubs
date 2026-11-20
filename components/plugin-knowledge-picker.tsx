@@ -67,9 +67,11 @@ export function PluginKnowledgePicker({ value, onChange, disabled, signal, onErr
 	onError: (error: unknown) => void;
 }) {
 	const controller = useOptionalInteractionLayers();
-	const { filter, revision: coursesRevision } = useCourses();
+	const { filter, revision: coursesRevision, refresh: refreshCourses } = useCourses();
 	const courseQuery = courseQueryParam(filter);
 	const cacheScope = `${courseQuery}:${coursesRevision}`;
+	const courseRef = useRef({ kind: filter.kind, refresh: refreshCourses });
+	courseRef.current = { kind: filter.kind, refresh: refreshCourses };
 	const pane = useContext(HostContentRootContext);
 	const route = useContext(HostRouteLifetimeContext);
 	const origin = useRef<PickerOrigin | null>(null);
@@ -171,7 +173,10 @@ export function PluginKnowledgePicker({ value, onChange, disabled, signal, onErr
 		void (async () => {
 			try {
 				const response = await fetch(`/api/graph${courseQuery}`, { signal: request.signal });
-				if (!response.ok) throw new Error("Could not read knowledge graph.");
+				if (!response.ok) {
+					if (response.status === 404 && courseRef.current.kind === "course") void courseRef.current.refresh();
+					throw new Error("Could not read knowledge graph.");
+				}
 				const graph = await response.json() as GraphSnapshot;
 				if (!alive.current || signal.aborted || request.signal.aborted || pending.current !== request || latest.current.disabled || !owner.owns()) return;
 				graphCache.current = graph; graphCacheScope.current = cacheScope; setSnapshot(graph); promote();

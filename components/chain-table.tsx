@@ -661,6 +661,53 @@ function RowCheckbox({
 	);
 }
 
+export function scopeSourceDirectoryFolders(directory: SourceDirectory): SourceDirectory {
+	const inScope = new Set(directory.sources.map((s) => s.id));
+	const folders = directory.organization.folders;
+	const byId = new Map(folders.map((f) => [f.id, f]));
+	const childrenOf = new Map<string, string[]>();
+	for (const f of folders) {
+		if (f.parentId === null) continue;
+		const list = childrenOf.get(f.parentId) ?? [];
+		list.push(f.id);
+		childrenOf.set(f.parentId, list);
+	}
+	const directIn = new Set<string>();
+	const directOut = new Set<string>();
+	for (const [sourceId, placement] of Object.entries(directory.organization.placements)) {
+		if (!placement.folderId) continue;
+		if (inScope.has(sourceId)) directIn.add(placement.folderId);
+		else directOut.add(placement.folderId);
+	}
+	const memo = new Map<string, { hasIn: boolean; hasOut: boolean }>();
+	const inspect = (id: string, visiting = new Set<string>()): { hasIn: boolean; hasOut: boolean } => {
+		const cached = memo.get(id);
+		if (cached) return cached;
+		if (visiting.has(id)) return { hasIn: false, hasOut: false };
+		visiting.add(id);
+		const folder = byId.get(id);
+		let hasIn = directIn.has(id);
+		let hasOut = directOut.has(id) || Boolean(folder?.importPath);
+		for (const childId of childrenOf.get(id) ?? []) {
+			const sub = inspect(childId, visiting);
+			if (sub.hasIn) hasIn = true;
+			if (sub.hasOut) hasOut = true;
+		}
+		const res = { hasIn, hasOut };
+		memo.set(id, res);
+		return res;
+	};
+	const keptFolders = folders.filter((f) => {
+		const { hasIn, hasOut } = inspect(f.id);
+		return hasIn || !hasOut;
+	});
+	if (keptFolders.length === folders.length) return directory;
+	return {
+		...directory,
+		organization: { ...directory.organization, folders: keptFolders },
+	};
+}
+
 /** The graph view's overlay wrapper: owns query + sort + selection +
  *  expansion; mounts ABSOLUTE INSIDE the
  *  graph area, full-bleed (owner ruling: the translucent blurred surface
@@ -709,7 +756,17 @@ export function ChainTableOverlay({
 	const [expandedChains, setExpandedChains] = useState<ReadonlySet<string>>(() => new Set());
 	const [deletion, setDeletion] = useState<{ sources: SourceEntry[]; folders: SourceFolder[] } | null>(null);
 	const deleteOpen = deletion !== null;
-	const [directory, setDirectory] = useState<SourceDirectory>();
+	const [rawDirectory, setRawDirectory] = useState<SourceDirectory>();
+	const rawDirectoryRef = useRef<SourceDirectory | undefined>(undefined);
+	rawDirectoryRef.current = rawDirectory;
+	const { filter, revision: coursesRevision, refresh: refreshCourses } = useCourses();
+	const courseQuery = courseQueryParam(filter);
+	const courseRef = useRef({ kind: filter.kind, refresh: refreshCourses });
+	courseRef.current = { kind: filter.kind, refresh: refreshCourses };
+	const directory = useMemo(
+		() => (rawDirectory && filter.kind !== "all" ? scopeSourceDirectoryFolders(rawDirectory) : rawDirectory),
+		[rawDirectory, filter.kind],
+	);
 	const [directoryPending, setDirectoryPending] = useState(true);
 	const visibleDirectory = useMemo(() => directory && chainSourceDirectory(directory), [directory]);
 	const [directoryFailure, setDirectoryFailure] = useState("");
@@ -722,8 +779,6 @@ export function ChainTableOverlay({
 			return sources.size === previous.sources.size && folders.size === previous.folders.size ? previous : { sources, folders };
 		});
 	}, [visibleDirectory]);
-	const { filter, revision: coursesRevision } = useCourses();
-	const courseQuery = courseQueryParam(filter);
 	const requestVersion = useRef(0);
 	const directoryOpening = useRef(0);
 	const directoryRequest = useRef<AbortController | null>(null);
@@ -735,9 +790,12 @@ export function ChainTableOverlay({
 		directoryRequest.current = request;
 		try {
 			const response = await fetch(`/api/graph/sources${courseQuery}`, { cache: "no-store", signal: request.signal });
-			if (!response.ok) throw new Error("Could not read source organization.");
+			if (!response.ok) {
+				if (response.status === 404 && courseRef.current.kind === "course") void courseRef.current.refresh();
+				throw new Error("Could not read source organization.");
+			}
 			const body = await response.json() as SourceDirectory;
-			if (!request.signal.aborted && version === requestVersion.current) { setDirectory(body); setDirectoryPending(false); setDirectoryFailure(""); }
+			if (!request.signal.aborted && version === requestVersion.current) { setRawDirectory(body); setDirectoryPending(false); setDirectoryFailure(""); }
 		} catch (error) { if (!request.signal.aborted && version === requestVersion.current) setDirectoryFailure(error instanceof Error ? error.message : String(error)); }
 	}, [courseQuery]);
 	useEffect(() => {
@@ -755,6 +813,18 @@ export function ChainTableOverlay({
 	useServerEvent("chats-changed", () => { if (open) void readDirectory(); });
 	useServerEvent("courses-changed", () => { if (open) void readDirectory(); });
 	useServerResync(() => { if (open) void readDirectory(); });
+	const applyScopedDirectoryUpdate = useCallback((body: SourceDirectory) => {
+		if (courseRef.current.kind === "all") {
+			setRawDirectory(body);
+			return;
+		}
+		const prev = rawDirectoryRef.current;
+		const keep = prev ? new Set(prev.sources.map((s) => s.id)) : null;
+		setRawDirectory({
+			organization: body.organization,
+			sources: keep ? body.sources.filter((s) => keep.has(s.id)) : [],
+		});
+	}, []);
 	const changeOrganization: OrganizationChange = (action) => {
 		const opening = directoryOpening.current;
 		// Serialize this page's edits, and invalidate older notify-then-fetch reads.
@@ -765,7 +835,8 @@ export function ChainTableOverlay({
 				if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "Could not save source organization.");
 				if (opening === directoryOpening.current) {
 					requestVersion.current++;
-					setDirectory(body as SourceDirectory); setDirectoryPending(false); setDirectoryFailure("");
+					applyScopedDirectoryUpdate(body as SourceDirectory); setDirectoryPending(false); setDirectoryFailure("");
+					if (courseRef.current.kind !== "all") void readDirectory();
 				}
 				if (action.action === "rename-source") {
 					const entry = (body as SourceDirectory).sources.find((s) => s.id === action.id);
@@ -880,7 +951,7 @@ export function ChainTableOverlay({
 							if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "Could not delete sources.");
 							graphRevision = body.graphRevision;
 							if (opening === directoryOpening.current) {
-								requestVersion.current++; setDirectory(body as SourceDirectory); setDirectoryPending(false); setDirectoryFailure("");
+								requestVersion.current++; applyScopedDirectoryUpdate(body as SourceDirectory); setDirectoryPending(false); setDirectoryFailure("");
 							}
 							setEntrySelection({ sources: new Set(), folders: new Set() });
 						} finally {
