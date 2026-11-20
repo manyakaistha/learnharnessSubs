@@ -11,10 +11,61 @@ import {
 	useState,
 	type ReactNode,
 } from "react";
-import type { CourseFilter, CourseRequest, CourseView, CoursesView } from "@/src/core";
+import type { CourseFilesResponse, CourseFilter, CourseRequest, CourseView, CoursesView } from "@/src/core";
 import { useNotifyHub } from "@/components/server-events";
 
 export const COURSE_FILTER_STORAGE_KEY = "lh:active-course";
+export const COURSE_ATTACH_MODE_STORAGE_PREFIX = "lh:attach-mode:";
+
+export type CourseAttachMode = "session" | "course";
+
+export type CourseAttachTarget =
+	| { kind: "chat"; chatId: string }
+	| { kind: "draft"; onStageFiles: (paths: readonly string[]) => void };
+
+export function courseAttachModeKey(courseId: string): string {
+	return `${COURSE_ATTACH_MODE_STORAGE_PREFIX}${courseId}`;
+}
+
+/** Read remembered paperclip/drop mode for a course ("session" default). */
+export function readCourseAttachMode(courseId: string): CourseAttachMode {
+	try {
+		return window.localStorage.getItem(courseAttachModeKey(courseId)) === "course" ? "course" : "session";
+	} catch {
+		return "session";
+	}
+}
+
+/** Persist paperclip/drop mode for a course in localStorage. */
+export function writeCourseAttachMode(courseId: string, mode: CourseAttachMode): void {
+	try {
+		window.localStorage.setItem(courseAttachModeKey(courseId), mode);
+	} catch {
+		// localStorage unavailable in restricted contexts
+	}
+}
+
+/** Upload files to POST /api/courses/files (multipart/form-data). */
+export async function postCourseFiles(
+	courseId: string,
+	files: readonly File[],
+	chatId?: string,
+): Promise<CourseFilesResponse> {
+	const form = new FormData();
+	form.append("courseId", courseId);
+	for (const file of files) form.append("files", file);
+	if (chatId) form.append("chatId", chatId);
+	const res = await fetch("/api/courses/files", { method: "POST", body: form });
+	const body = (await res.json().catch(() => ({}))) as Partial<CourseFilesResponse> & { error?: unknown };
+	if (!res.ok) {
+		throw new Error(typeof body.error === "string" ? body.error : `Failed to add course files (${res.status})`);
+	}
+	return {
+		courses: Array.isArray(body.courses) ? body.courses : [],
+		membership: body.membership && typeof body.membership === "object" ? body.membership : {},
+		copied: Array.isArray(body.copied) ? body.copied.filter((p): p is string => typeof p === "string") : [],
+	};
+}
 
 const ALL_FILTER: CourseFilter = { kind: "all" };
 const NONE_FILTER: CourseFilter = { kind: "none" };
@@ -93,6 +144,9 @@ export interface CoursesContextValue {
 	setFilter: (next: CourseFilter) => void;
 	refresh: () => Promise<void>;
 	mutate: (request: CourseRequest) => Promise<CoursesView>;
+	uploadFiles: (courseId: string, files: readonly File[], chatId?: string) => Promise<CourseFilesResponse>;
+	registerAttachTarget: (target: CourseAttachTarget) => () => void;
+	getAttachTarget: () => CourseAttachTarget | null;
 }
 
 const DEFAULT_CONTEXT: CoursesContextValue = {
@@ -106,12 +160,37 @@ const DEFAULT_CONTEXT: CoursesContextValue = {
 	setFilter: () => {},
 	refresh: async () => {},
 	mutate: async () => ({ courses: [], membership: {} }),
+	uploadFiles: (courseId, files, chatId) => postCourseFiles(courseId, files, chatId),
+	registerAttachTarget: () => () => {},
+	getAttachTarget: () => null,
 };
 
 const CoursesContext = createContext<CoursesContextValue>(DEFAULT_CONTEXT);
 
 export function useCourses(): CoursesContextValue {
 	return useContext(CoursesContext);
+}
+
+/** Register the current page's chat or draft target for FilePathDropZone. */
+export function useCourseAttachTarget(target: CourseAttachTarget | null): void {
+	const { registerAttachTarget } = useCourses();
+	const targetRef = useRef(target);
+	targetRef.current = target;
+	const kind = target?.kind ?? null;
+	const chatId = target?.kind === "chat" ? target.chatId : undefined;
+	useEffect(() => {
+		if (!kind) return;
+		const entry: CourseAttachTarget =
+			kind === "chat"
+				? { kind: "chat", chatId: chatId! }
+				: {
+					kind: "draft",
+					onStageFiles: (paths) => {
+						if (targetRef.current?.kind === "draft") targetRef.current.onStageFiles(paths);
+					},
+				};
+		return registerAttachTarget(entry);
+	}, [registerAttachTarget, kind, chatId]);
 }
 
 function readStoredFilter(): CourseFilter {
@@ -271,6 +350,24 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 		[courses, filter],
 	);
 
+	const attachTargetRef = useRef<CourseAttachTarget | null>(null);
+	const registerAttachTarget = useCallback((target: CourseAttachTarget) => {
+		attachTargetRef.current = target;
+		return () => {
+			if (attachTargetRef.current === target) attachTargetRef.current = null;
+		};
+	}, []);
+	const getAttachTarget = useCallback(() => attachTargetRef.current, []);
+
+	const uploadFiles = useCallback(
+		async (courseId: string, files: readonly File[], chatId?: string): Promise<CourseFilesResponse> => {
+			const result = await postCourseFiles(courseId, files, chatId);
+			applyView({ courses: result.courses, membership: result.membership }, true);
+			return result;
+		},
+		[applyView],
+	);
+
 	const value = useMemo<CoursesContextValue>(
 		() => ({
 			courses,
@@ -283,8 +380,11 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
 			setFilter,
 			refresh: () => refresh(false),
 			mutate,
+			uploadFiles,
+			registerAttachTarget,
+			getAttachTarget,
 		}),
-		[courses, membership, loaded, filter, activeCourse, revision, setFilter, refresh, mutate],
+		[courses, membership, loaded, filter, activeCourse, revision, setFilter, refresh, mutate, uploadFiles, registerAttachTarget, getAttachTarget],
 	);
 
 	return <CoursesContext.Provider value={value}>{children}</CoursesContext.Provider>;

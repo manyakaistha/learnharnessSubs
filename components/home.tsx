@@ -19,7 +19,7 @@ import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { PathInput } from "@/components/path-input";
 import { AttachFilesButton } from "@/components/attach-files-button";
 import { SessionStarter } from "@/components/start-session";
-import { useCourses } from "@/components/courses";
+import { useCourseAttachTarget, useCourses } from "@/components/courses";
 import type { TurnUsage } from "@/src/core";
 
 /**
@@ -39,13 +39,24 @@ export function Home({
 	rendering?: boolean;
 }) {
 	const controller = useOptionalInteractionLayers();
-	const { activeCourseId, refresh: refreshCourses } = useCourses();
+	const { activeCourseId, refresh: refreshCourses, mutate: mutateCourses } = useCourses();
 	const router = useRouter();
 	const pathname = usePathname();
 	const bodyRef = useRef<HTMLDivElement>(null);
 	const surfaceTarget = usePageSurfaceBoundary({ active: pathname === "/", viewKey: "/", bodyRef });
 	const chromeStyle = useSurfaceChromeStyle(surfaceTarget);
 	const [topic, setTopic] = useState("");
+	const pendingSessionFilesRef = useRef<string[]>([]);
+	const [attachError, setAttachError] = useState("");
+	useEffect(() => {
+		pendingSessionFilesRef.current = [];
+		setAttachError("");
+	}, [activeCourseId]);
+	const stageSessionFiles = useCallback((paths: readonly string[]) => {
+		pendingSessionFilesRef.current = [...new Set([...pendingSessionFilesRef.current, ...paths])];
+		setAttachError("");
+	}, []);
+	useCourseAttachTarget({ kind: "draft", onStageFiles: stageSessionFiles });
 	/* The topic MIRROR ("nothing gets lost" round, 2026-10-01 — same
 	 * mechanics as the chat composer, owner's consistency ruling): a
 	 * dictation flush lands via setState, invisible to a closure that
@@ -148,6 +159,8 @@ export function Home({
 		startingRef.current = true;
 		setBusy(true);
 		setStartError(false);
+		setAttachError("");
+		let chatCreated = false;
 		try {
 			// The map context (owner, 2026-10-04): picks in EITHER mode ride
 			// the CREATION as graphContext — the server writes a
@@ -160,12 +173,23 @@ export function Home({
 				...(mode === "practice" ? { kind: "practice" } : {}),
 				...(practiceProps.length > 0 ? { graphContext: { propositions: practiceProps } } : {}),
 			}, fetch, JSON.stringify(catalog?.slots.strong));
+			chatCreated = true;
+			const createdChatId = starterRef.current.createdChatId;
+			if (createdChatId && pendingSessionFilesRef.current.length > 0) {
+				await mutateCourses({
+					action: "attach-session-files",
+					chatId: createdChatId,
+					paths: pendingSessionFilesRef.current,
+				});
+				pendingSessionFilesRef.current = [];
+			}
 			if (activeCourseId) void refreshCourses();
 			router.push(target);
-		} catch {
+		} catch (err) {
 			startingRef.current = false;
 			setBusy(false);
-			setStartError(true);
+			if (chatCreated) setAttachError(err instanceof Error ? err.message : String(err));
+			else setStartError(true);
 		}
 	};
 
@@ -246,6 +270,7 @@ export function Home({
 						)}
 					/>
 					{startError && <p role="alert" className="mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
+					{attachError && <p role="alert" data-testid="draft-attach-error" className="mb-2 text-sm text-destructive">{attachError}</p>}
 					<form
 						data-attachment-composer=""
 						className="flex items-end gap-1.5 rounded-2xl border bg-card p-1.5 shadow-lg"
@@ -283,7 +308,7 @@ export function Home({
 						autoFocus
 						className="field-sizing-content lh-input max-h-48 min-h-10 flex-1 resize-none bg-transparent px-2.5 py-2 outline-none placeholder:text-muted-foreground"
 					/>
-					<AttachFilesButton editorRef={topicInputRef} />
+					<AttachFilesButton editorRef={topicInputRef} onStageSessionFiles={stageSessionFiles} />
 					{/* No tooltip on the start square — the ↵ glyph is the
 					    affordance (owner, subtlety round 2026-09-25). */}
 					<button

@@ -17,7 +17,7 @@ import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { SessionStarter } from "@/components/start-session";
-import { courseQueryParam, useCourses } from "@/components/courses";
+import { courseQueryParam, useCourseAttachTarget, useCourses } from "@/components/courses";
 import type { ChatSettings, GraphSnapshot } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
@@ -80,11 +80,13 @@ export function DraftShell({
 	onChange,
 	onSend,
 	startError = false,
+	attachError = "",
 	setupCta,
 	mode = "teach",
 	picks = [],
 	onOpenPicker,
 	onClearPicks,
+	onStageSessionFiles,
 	overlay,
 }: {
 	busy: boolean;
@@ -92,6 +94,7 @@ export function DraftShell({
 	onChange: (v: string) => void;
 	onSend: () => void;
 	startError?: boolean;
+	attachError?: string;
 	/** The practice draft (owner, 2026-10-04): ?mode=practice — the
 	 *  created session carries kind:"practice" and the copy changes
 	 *  (the practice agent opens; no probing). */
@@ -108,6 +111,7 @@ export function DraftShell({
 	picks?: DraftPick[];
 	onOpenPicker?: () => void;
 	onClearPicks?: () => void;
+	onStageSessionFiles?: (paths: readonly string[]) => void;
 	/** THE PICKER SLOT (owner round 10b): the chain-table overlay hosts
 	 *  INSIDE the content column's relative container — the same law as
 	 *  the graph view (the overlay fills its column, never the sidebar).
@@ -200,6 +204,7 @@ export function DraftShell({
 									setup={setupCta}
 								/>
 								{startError && <p role="alert" className="pointer-events-auto mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
+								{attachError && <p role="alert" data-testid="draft-attach-error" className="pointer-events-auto mb-2 text-sm text-destructive">{attachError}</p>}
 								<div data-attachment-composer="" className="pointer-events-auto overflow-hidden rounded-2xl border bg-card shadow-lg">
 									<Composer
 										busy={busy}
@@ -210,6 +215,7 @@ export function DraftShell({
 										canSend={canSend}
 										inputRef={composerInputRef}
 										autoFocus
+										onStageSessionFiles={onStageSessionFiles}
 										onEscape={dictation.active ? dictation.cancel : undefined}
 										// The opening question, same as the graph view's new-session
 										// input (owner refinement round, 2026-09-24) — no lesson has
@@ -244,9 +250,20 @@ export function DraftShell({
 
 export function NewSession({ initialConfigured, mode = "teach" }: { initialConfigured: boolean; mode?: "teach" | "practice" }) {
 	const router = useRouter();
-	const { filter, activeCourseId, revision, refresh: refreshCourses } = useCourses();
+	const { filter, activeCourseId, revision, refresh: refreshCourses, mutate: mutateCourses } = useCourses();
 	const courseQuery = courseQueryParam(filter);
 	const [text, setText] = useState("");
+	const pendingSessionFilesRef = useRef<string[]>([]);
+	const [attachError, setAttachError] = useState("");
+	useEffect(() => {
+		pendingSessionFilesRef.current = [];
+		setAttachError("");
+	}, [activeCourseId]);
+	const stageSessionFiles = useCallback((paths: readonly string[]) => {
+		pendingSessionFilesRef.current = [...new Set([...pendingSessionFilesRef.current, ...paths])];
+		setAttachError("");
+	}, []);
+	useCourseAttachTarget({ kind: "draft", onStageFiles: stageSessionFiles });
 	/* The draft MIRROR ("nothing gets lost" round, 2026-10-01): the shell's
 	 * finish-first send calls THIS send after the dictation flush — which
 	 * landed via setState and may not have re-rendered yet. The send reads
@@ -346,26 +363,51 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		startingRef.current = true;
 		setBusy(true);
 		setStartError(false);
-		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined,
-			starterRef.current, JSON.stringify(catalog?.slots.strong), activeCourseId)
-			.then((target) => {
-				if (target) {
-					if (activeCourseId) void refreshCourses();
-					router.push(target);
-				} else { startingRef.current = false; setBusy(false); }
-			})
-			.catch(() => {
+		setAttachError("");
+		void (async () => {
+			let chatCreated = false;
+			try {
+				const target = await startDraftSession(
+					draft,
+					fetch,
+					mode === "practice" ? "practice" : undefined,
+					mode === "practice" ? picksRef.current : undefined,
+					starterRef.current,
+					JSON.stringify(catalog?.slots.strong),
+					activeCourseId,
+				);
+				if (!target) {
+					startingRef.current = false;
+					setBusy(false);
+					return;
+				}
+				chatCreated = true;
+				const createdChatId = starterRef.current.createdChatId;
+				if (createdChatId && pendingSessionFilesRef.current.length > 0) {
+					await mutateCourses({
+						action: "attach-session-files",
+						chatId: createdChatId,
+						paths: pendingSessionFilesRef.current,
+					});
+					pendingSessionFilesRef.current = [];
+				}
+				if (activeCourseId) void refreshCourses();
+				router.push(target);
+			} catch (err) {
 				startingRef.current = false;
 				setBusy(false);
-				setStartError(true);
-			});
-	}, [router, configured, zeroKeys, catalog, mode, activeCourseId, refreshCourses]);
+				if (chatCreated) setAttachError(err instanceof Error ? err.message : String(err));
+				else setStartError(true);
+			}
+		})();
+	}, [router, configured, zeroKeys, catalog, mode, activeCourseId, refreshCourses, mutateCourses]);
 
 	return (
 		<>
 			<DraftShell
 				busy={busy}
 				startError={startError}
+				attachError={attachError}
 				text={text}
 				onChange={applyText}
 				onSend={send}
@@ -373,6 +415,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				picks={picks}
 				onOpenPicker={openPicker}
 				onClearPicks={() => applyPicks([])}
+				onStageSessionFiles={stageSessionFiles}
 				overlay={
 					// THE PICKER (owner round 10b): hosted INSIDE the content
 					// column — absolute inset-0 resolves to the column's relative

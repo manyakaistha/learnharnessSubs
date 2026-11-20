@@ -61,6 +61,7 @@ export function ChatSessionComposer({
 	nextProblem,
 	onNext,
 	pendingInput = false,
+	chatId,
 }: {
 	busy: boolean;
 	value: string;
@@ -77,6 +78,7 @@ export function ChatSessionComposer({
 	nextProblem?: boolean;
 	onNext?: () => void;
 	pendingInput?: boolean;
+	chatId?: string;
 }) {
 	const [draft, setDraft] = useState(value);
 	useLayoutEffect(() => { setDraft(value); }, [revision, value]);
@@ -100,6 +102,7 @@ export function ChatSessionComposer({
 			placeholder={placeholder}
 			nextProblem={nextProblem}
 			onNext={onNext}
+			chatId={chatId}
 		/>
 	);
 }
@@ -119,6 +122,8 @@ export function Composer({
 	onNext,
 	defaultDropTarget = true,
 	fileInsertion = true,
+	chatId,
+	onStageSessionFiles,
 }: {
 	busy: boolean;
 	value: string;
@@ -147,6 +152,8 @@ export function Composer({
 	/** Neutral plugin composers opt out without changing core defaults. */
 	defaultDropTarget?: boolean;
 	fileInsertion?: boolean;
+	chatId?: string;
+	onStageSessionFiles?: (paths: readonly string[]) => void;
 }) {
 	const controller = useOptionalInteractionLayers();
 	const act = () => {
@@ -197,7 +204,7 @@ export function Composer({
 				autoFocus={autoFocus}
 				className="field-sizing-content lh-input max-h-48 min-h-10 flex-1 resize-none bg-transparent px-2.5 py-2 outline-none placeholder:text-muted-foreground"
 			/>
-			<AttachFilesButton editorRef={editorRef} />
+			<AttachFilesButton editorRef={editorRef} chatId={chatId} onStageSessionFiles={onStageSessionFiles} />
 			{/* The button follows the text (owner report 2026-10-03): while
 				 a turn runs WITH text typed it stays the SEND affordance
 				 (click = steer — steering must be clickable, not Enter-only);

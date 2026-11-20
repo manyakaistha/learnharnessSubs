@@ -14,6 +14,10 @@ interface SessionCreation {
 export class SessionStarter {
 	private created?: { identity: string; id: string };
 
+	get createdChatId(): string | undefined {
+		return this.created?.id;
+	}
+
 	async start(body: SessionCreation, fetchLike: typeof fetch, settingsIdentity?: string): Promise<string> {
 		const identity = JSON.stringify([body, settingsIdentity]);
 		if (this.created?.identity !== identity) {
