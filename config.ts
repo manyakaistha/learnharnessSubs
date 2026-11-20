@@ -81,6 +81,9 @@ export const LEDGER_FILES = {
 export const SOURCES_FILE = path.join(/* turbopackIgnore: true */ PATHS.graph, "sources.json");
 /** Presentation-only source names/folder placement; never extraction identity. */
 export const SOURCE_ORGANIZATION_FILE = path.join(/* turbopackIgnore: true */ PATHS.graph, "source-organization.json");
+/** Courses (core/contracts/courses.ts): course list, source membership, and
+ *  course-folder extraction bookkeeping. A projection over the graph, never identity. */
+export const COURSES_FILE = path.join(/* turbopackIgnore: true */ PATHS.graph, "courses.json");
 /** The layout ledger (read-modify-write like sources.json): nodeId →
  *  {x,y} resting positions from the incremental settle (core/layout.ts).
  *  Carries an updatedAt stamp for future live-physics conflict handling. */
