@@ -18,13 +18,15 @@
  * The practice pick flow mirrors GraphView's contract verbatim (home
  * lifts the pick set; the chip opens the overlay in select mode).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ListTreeIcon } from "lucide-react";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { GraphCostControl } from "@/components/graph-view.tsx";
 import { NotesImportControl, NotesImportErrors, NotesImportNotices, useNotesImport } from "@/components/notes-import.tsx";
 import { Hint } from "@/components/ui/hint";
-import type { ChatSummary, GraphCostSummary, GraphSnapshot } from "@/src/core";
+import { chatMatchesCourseFilter, courseQueryParam, useCourses } from "@/components/courses";
+import { useNotifyHub } from "@/components/server-events";
+import type { ChatListItem, GraphCostSummary, GraphSnapshot } from "@/src/core";
 
 /** The quiet centered summary — a pure body (props in, markup out) so
  * the render suite can pin it statically. Very quiet by owner ruling:
@@ -35,12 +37,14 @@ export function KnowledgeSummary({
 	teachSessions,
 	practiceSessions,
 	importedNotes,
+	courseName,
 }: {
 	propositions: number;
 	chains: number;
 	teachSessions: number;
 	practiceSessions: number;
 	importedNotes: number;
+	courseName?: string | null;
 }) {
 	const empty =
 		propositions === 0 && chains === 0 && teachSessions === 0 && practiceSessions === 0 && importedNotes === 0;
@@ -73,8 +77,17 @@ export function KnowledgeSummary({
 			</p>
 			{empty && (
 				<div className="pt-2 font-ui text-xs text-muted-foreground/70">
-					<p>Start a session to begin learning.</p>
-					<p className="mt-1">Attach your material with the paperclip or drag and drop.</p>
+					{courseName ? (
+						<>
+							<p>Start a session in {courseName} to begin learning.</p>
+							<p className="mt-1">Attach a folder in Course settings or drop files here.</p>
+						</>
+					) : (
+						<>
+							<p>Start a session to begin learning.</p>
+							<p className="mt-1">Attach your material with the paperclip or drag and drop.</p>
+						</>
+					)}
 				</div>
 			)}
 		</div>
@@ -94,30 +107,60 @@ export function MinimalHome({
 	onPracticeSelectionChange?: (nodes: { id: string; name: string; statement: string }[]) => void;
 	onChainSelectClose?: () => void;
 }) {
+	const { filter, courses, membership, loaded: coursesLoaded, activeCourse, revision: coursesRevision, refresh: refreshCourses } = useCourses();
+	const courseQuery = courseQueryParam(filter);
+	const courseRef = useRef({ kind: filter.kind, refresh: refreshCourses });
+	courseRef.current = { kind: filter.kind, refresh: refreshCourses };
+	const hub = useNotifyHub();
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
 	const [costs, setCosts] = useState<GraphCostSummary | null>(null);
-	const [chats, setChats] = useState<ChatSummary[]>([]);
+	const [chats, setChats] = useState<ChatListItem[]>([]);
 	const [chainsOpen, setChainsOpen] = useState(false);
 
 	const readState = useCallback(() => {
-		fetch("/api/graph")
-			.then((res) => res.json() as Promise<GraphSnapshot>)
+		fetch(`/api/graph${courseQuery}`)
+			.then((res) => {
+				if (!res.ok) {
+					if (res.status === 404 && courseRef.current.kind === "course") void courseRef.current.refresh();
+					throw new Error(`Graph fetch failed (${res.status})`);
+				}
+				return res.json() as Promise<GraphSnapshot>;
+			})
 			.then(setSnapshot)
 			.catch(() => {});
 		fetch("/api/graph/costs")
-			.then((res) => res.json() as Promise<GraphCostSummary>)
+			.then((res) => {
+				if (!res.ok) throw new Error(`Costs fetch failed (${res.status})`);
+				return res.json() as Promise<GraphCostSummary>;
+			})
 			.then(setCosts)
 			.catch(() => {});
 		fetch("/api/chats")
-			.then((res) => res.json() as Promise<{ chats: ChatSummary[] }>)
-			.then((body) => setChats(body.chats))
+			.then((res) => {
+				if (!res.ok) throw new Error(`Chats fetch failed (${res.status})`);
+				return res.json() as Promise<{ chats: ChatListItem[] }>;
+			})
+			.then((body) => {
+				if (Array.isArray(body?.chats)) setChats(body.chats);
+			})
 			.catch(() => {});
-	}, []);
+	}, [courseQuery]);
 	useEffect(() => {
 		readState();
 		window.addEventListener("lh:graph-revision", readState);
 		return () => window.removeEventListener("lh:graph-revision", readState);
-	}, [readState]);
+	}, [readState, coursesRevision]);
+	useEffect(() => {
+		if (!hub) return;
+		const offChats = hub.subscribe("chats-changed", readState);
+		const offSources = hub.subscribe("sources-changed", readState);
+		const offCourses = hub.subscribe("courses-changed", readState);
+		return () => {
+			offChats();
+			offSources();
+			offCourses();
+		};
+	}, [hub, readState]);
 
 	// The practice chip opens the table in select mode (GraphView's law):
 	// the pick intent raises the overlay; Done/close reports back down.
@@ -129,8 +172,9 @@ export function MinimalHome({
 	const notesImport = useNotesImport({ onFinish: readState });
 	const { importing, onImportFiles } = notesImport;
 
-	const teachSessions = chats.filter((c) => c.kind === "teach").length;
-	const practiceSessions = chats.filter((c) => c.kind === "practice").length;
+	const filteredChats = chats.filter((c) => chatMatchesCourseFilter(c, filter, membership, courses, coursesLoaded));
+	const teachSessions = filteredChats.filter((c) => (c.kind ?? "teach") === "teach").length;
+	const practiceSessions = filteredChats.filter((c) => c.kind === "practice").length;
 
 	return (
 		<div className="relative h-full">
@@ -142,6 +186,7 @@ export function MinimalHome({
 					teachSessions={teachSessions}
 					practiceSessions={practiceSessions}
 					importedNotes={Object.keys(snapshot?.fileSources ?? {}).length}
+					courseName={activeCourse?.name}
 				/>
 			</div>
 

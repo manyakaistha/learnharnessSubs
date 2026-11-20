@@ -6,9 +6,12 @@ import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
 import type { ChatDeleteMode, ThemeMode } from "@/src/core";
-import { DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
+import { CourseSwitcher } from "@/components/course-switcher";
+import { CoursePanelDialog } from "@/components/course-dialog";
+import { chatMatchesCourseFilter, effectiveChatCourseId, useCourses } from "@/components/courses";
 import { LhMark } from "@/components/lh-mark";
 import { BrailleSpinner } from "@/components/braille-spinner";
 import { KeyboardShortcuts } from "@/components/keyboard-shortcuts";
@@ -402,9 +405,11 @@ export function RenameRow({ chat, onCommit, onCancel }: { chat: ChatListItem; on
 export type SessionKindFilter = "teach" | "all" | "practice";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 
-function SessionsSidebar() {
+export function SessionsSidebar() {
 	const interactions = useInteractionLayers();
 	const { open, toggle } = useSidebar();
+	const { courses, membership, loaded: coursesLoaded, filter: courseFilter, activeCourse, mutate: mutateCourse } = useCourses();
+	const [coursePanelId, setCoursePanelId] = useState<string | null>(null);
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
@@ -431,9 +436,14 @@ function SessionsSidebar() {
 	/* FUZZY (owner round 8, 2026-10-05): subsequence match ranked by
 	 * fuzzyScore — prefix beats word-boundary beats scattered. Empty query
 	 * keeps the natural list order (scores are all 0, sort is stable). */
+	const courseScopedChats = useMemo(() => {
+		if (!chats) return null;
+		return chats.filter((c) => chatMatchesCourseFilter(c, courseFilter, membership, courses, coursesLoaded));
+	}, [chats, courseFilter, membership, courses, coursesLoaded]);
+
 	const shown = useMemo(() => {
 		const q = query.trim();
-		let list = chats;
+		let list = courseScopedChats;
 		if (list && kindFilter !== "all") {
 			list = list.filter((c) => (c.kind ?? "teach") === kindFilter);
 		}
@@ -444,7 +454,7 @@ function SessionsSidebar() {
 			.filter((r): r is { c: (typeof list)[number]; score: number } => r.score !== null)
 			.sort((a, b) => b.score - a.score)
 			.map((r) => r.c);
-	}, [chats, query, kindFilter]);
+	}, [courseScopedChats, query, kindFilter]);
 
 	const refreshInFlightRef = useRef(false);
 	const refresh = useCallback(async () => {
@@ -527,6 +537,7 @@ function SessionsSidebar() {
 		}, 250);
 	};
 	useServerEvent("chats-changed", scheduleEventRefresh);
+	useServerEvent("courses-changed", scheduleEventRefresh);
 	useServerEvent("turn-started", scheduleEventRefresh);
 	useServerEvent("turn-settled", scheduleEventRefresh);
 	useServerEvent("compaction-changed", scheduleEventRefresh);
@@ -549,6 +560,9 @@ function SessionsSidebar() {
 	   coexist: hovering doesn't claim, a click or an open clears the
 	   selection. */
 	const [kbdIndex, setKbdIndex] = useState<number | null>(null);
+	useEffect(() => {
+		setKbdIndex(null);
+	}, [courseFilter]);
 	const searchRef = useRef<HTMLInputElement>(null);
 	const listRef = useRef<HTMLDivElement>(null);
 
@@ -561,6 +575,7 @@ function SessionsSidebar() {
 	   right-clicked — assigned into a ref before the state flip so the
 	   shell measures it on its first (hidden) pass. */
 	const [ctxChatId, setCtxChatId] = useState<string | null>(null);
+	const [moveCourseOpen, setMoveCourseOpen] = useState(false);
 	const ctxAnchorRef = useRef<HTMLElement | null>(null);
 	const [renamingId, setRenamingId] = useState<string | null>(null);
 	const [deleting, setDeleting] = useState<ChatListItem | null>(null);
@@ -568,6 +583,7 @@ function SessionsSidebar() {
 	const openContext = (e: React.MouseEvent<HTMLButtonElement>, chat: ChatListItem) => {
 		e.preventDefault(); // suppress the native menu
 		ctxAnchorRef.current = e.currentTarget;
+		setMoveCourseOpen(false);
 		setCtxChatId(chat.id);
 	};
 
@@ -698,6 +714,9 @@ function SessionsSidebar() {
 					</Hint>
 				</div>
 
+				{/* Course switcher (above search & session actions). */}
+				<CourseSwitcher onOpenPanel={(id) => setCoursePanelId(id)} />
+
 				{/* Core doors always lead explicit plugin sidebar placements. */}
 				<PluginSidebarActions>
 					<button
@@ -818,7 +837,24 @@ function SessionsSidebar() {
 						<div className="px-2 py-4 text-xs text-muted-foreground">Loading…</div>
 					) : shown.length === 0 ? (
 						<div className="px-2 py-4 text-xs text-muted-foreground">
-							{query.trim() ? "No sessions match." : "No sessions yet."}
+							{query.trim() ? (
+								"No sessions match."
+							) : activeCourse && (courseScopedChats?.length ?? 0) === 0 ? (
+								<span data-testid="course-empty-hint">
+									No sessions in this course yet. Start a session or{" "}
+									<button
+										type="button"
+										data-testid="course-empty-attach"
+										onClick={() => setCoursePanelId(activeCourse.id)}
+										className="underline underline-offset-2 hover:text-foreground"
+									>
+										attach a folder
+									</button>
+									.
+								</span>
+							) : (
+								"No sessions yet."
+							)}
 						</div>
 					) : (
 						shown.map((c, i) =>
@@ -923,6 +959,73 @@ function SessionsSidebar() {
 						</button>
 						<button
 							type="button"
+							data-testid="ctx-move-course"
+							aria-expanded={moveCourseOpen}
+							onClick={() => setMoveCourseOpen((v) => !v)}
+							onKeyDown={(e) => {
+								if (e.key === "ArrowRight") setMoveCourseOpen(true);
+								if (e.key === "ArrowLeft") setMoveCourseOpen(false);
+							}}
+							className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+						>
+							<span>Move to course</span>
+							{moveCourseOpen ? (
+								<ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+							) : (
+								<ChevronRightIcon aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+							)}
+						</button>
+						{moveCourseOpen && (() => {
+							const ctxChat = chats?.find((c) => c.id === ctxChatId);
+							const currentCourseId = ctxChat
+								? effectiveChatCourseId(ctxChat, membership)
+								: (membership[ctxChatId] ?? null);
+							const assign = (targetCourseId: string | null) => {
+								const chatId = ctxChatId;
+								setCtxChatId(null);
+								setMoveCourseOpen(false);
+								setChats((prev) =>
+									prev ? prev.map((c) => (c.id === chatId ? { ...c, courseId: targetCourseId } : c)) : prev,
+								);
+								void mutateCourse({ action: "assign", sourceId: chatId, courseId: targetCourseId })
+									.then(() => void refresh())
+									.catch(() => void refresh());
+							};
+							return (
+								<div
+									data-testid="ctx-move-course-submenu"
+									className="ml-2 flex flex-col gap-0.5 border-l border-border/60 pl-2"
+								>
+									<button
+										type="button"
+										data-testid="ctx-move-course-none"
+										onClick={() => assign(null)}
+										className="flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-left text-foreground transition-colors hover:bg-accent"
+									>
+										<span>No course</span>
+										{currentCourseId === null && (
+											<CheckIcon aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+										)}
+									</button>
+									{courses.map((course) => (
+										<button
+											key={course.id}
+											type="button"
+											data-testid={`ctx-move-course-${course.id}`}
+											onClick={() => assign(course.id)}
+											className="flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-left text-foreground transition-colors hover:bg-accent"
+										>
+											<span className="min-w-0 truncate">{course.name}</span>
+											{currentCourseId === course.id && (
+												<CheckIcon aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+											)}
+										</button>
+									))}
+								</div>
+							);
+						})()}
+						<button
+							type="button"
 							data-testid="ctx-delete"
 							onClick={() => {
 								const target = chats?.find((c) => c.id === ctxChatId);
@@ -944,6 +1047,18 @@ function SessionsSidebar() {
 					chat={deleting}
 					onClose={() => setDeleting(null)}
 					onDeleted={onDeleted}
+				/>
+				<CoursePanelDialog
+					courseId={coursePanelId}
+					open={coursePanelId !== null}
+					onClose={() => setCoursePanelId(null)}
+					onDeletedCourse={(mode, ownIds) => {
+						if (mode === "delete-sources") {
+							setChats((prev) => (prev ? prev.filter((c) => !ownIds.includes(c.id)) : prev));
+							if (ownIds.some((sid) => pathname === `/chat/${sid}`)) router.push("/");
+						}
+						void refresh();
+					}}
 				/>
 			</aside>
 	);

@@ -78,12 +78,21 @@ export type { GraphRenderSettings };
 
 // ─── Public data contract ──────────────────────────────────────────────────
 
+/** Opacity used for nodes inherited from an included course (no own provenance). */
+export const INHERITED_NODE_ALPHA = 0.35;
+
 /** One node to draw: world-space position + the short glanceable label. */
 export interface CanvasNode {
 	id: string;
 	x: number;
 	y: number;
 	label: string;
+	inherited?: boolean;
+}
+
+/** Alpha multiplier for one node disc/label (dimmed when inherited, full otherwise). */
+export function nodeOpacity(node: Pick<CanvasNode, "inherited">): number {
+	return node.inherited ? INHERITED_NODE_ALPHA : 1;
 }
 
 /** One directed edge of the DERIVED view (chains-primary, 2026-09-30):
@@ -653,6 +662,8 @@ export class GraphCanvasRenderer {
 	private geoVersion = 0; // bump = geometry inputs changed
 	private builtVersion = -1; // version the cache was built at
 	private nodesPath: Path2D | null = null;
+	private inheritedNodesPath: Path2D | null = null;
+	private hasInheritedNodes = false;
 	private shaftsPath: Path2D = new Path2D();
 	private headsPath: Path2D = new Path2D();
 	private regionCanvas: HTMLCanvasElement | null = null;
@@ -1252,15 +1263,21 @@ export class GraphCanvasRenderer {
 		const visible = this.visible;
 		const isVisible = (id: string) => !visible || visible.has(id);
 
-		// Node discs: one Path2D, one fill() per frame. Implication nodes
-		// are pure geometry — never a disc, never a label, never picked.
+		// Node discs: own and inherited Path2Ds, one fill() each per frame.
+		// Implication nodes are pure geometry — never a disc, never a label, never picked.
 		const nodesPath = new Path2D();
+		const inheritedNodesPath = new Path2D();
+		let hasInherited = false;
 		for (const n of data.nodes) {
 			if (!isVisible(n.id) || isImpNodeId(n.id)) continue;
-			nodesPath.moveTo(n.x + nodeR, n.y);
-			nodesPath.arc(n.x, n.y, nodeR, 0, Math.PI * 2);
+			const target = n.inherited ? inheritedNodesPath : nodesPath;
+			if (n.inherited) hasInherited = true;
+			target.moveTo(n.x + nodeR, n.y);
+			target.arc(n.x, n.y, nodeR, 0, Math.PI * 2);
 		}
 		this.nodesPath = nodesPath;
+		this.inheritedNodesPath = inheritedNodesPath;
+		this.hasInheritedNodes = hasInherited;
 
 		// Edge shafts + arrowheads (rendering arc, owner 2026-09-30): all
 		// arrows are PLAIN single shafts — the old double-shaft glyph is
@@ -1677,19 +1694,26 @@ export class GraphCanvasRenderer {
 			ctx.fill(this.headsPath);
 		}
 
-		// 4. Nodes: one cached Path2D, one fill.
+		// 4. Nodes: own nodes at full opacity, inherited nodes dimmed.
 		ctx.fillStyle = data.colors.node;
 		ctx.fill(this.nodesPath);
+		if (this.hasInheritedNodes && this.inheritedNodesPath) {
+			ctx.save();
+			ctx.globalAlpha = INHERITED_NODE_ALPHA;
+			ctx.fillStyle = data.colors.node;
+			ctx.fill(this.inheritedNodesPath);
+			ctx.restore();
+		}
 
 		// 6. Node labels — one global gate, faded together. World-scaled
 		// with the graph (they grow as you zoom in, Obsidian-style).
 		if (nodeAlpha > 0.01) {
 			ctx.save();
-			ctx.globalAlpha = nodeAlpha;
 			ctx.font = this.worldLabelFont;
 			for (const [id, lines] of this.labelLines) {
 				const n = this.nodeById.get(id);
 				if (!n) continue;
+				ctx.globalAlpha = nodeAlpha * nodeOpacity(n);
 				drawNameLines(ctx, n.x, n.y, lines, this.world, data.colors.label);
 			}
 			ctx.restore();

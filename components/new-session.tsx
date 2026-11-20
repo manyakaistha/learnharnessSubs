@@ -17,6 +17,7 @@ import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { SessionStarter } from "@/components/start-session";
+import { courseQueryParam, useCourses } from "@/components/courses";
 import type { ChatSettings, GraphSnapshot } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
@@ -50,17 +51,19 @@ export async function startDraftSession(
 	picks?: readonly DraftPick[],
 	starter = new SessionStarter(),
 	settingsIdentity?: string,
+	courseId?: string | null,
 ): Promise<string | null> {
 	const t = text.trim();
 	if (!t) return null;
+	const coursePart = courseId !== undefined ? { courseId } : {};
 	// THE PICKS RIDE THE CREATE (owner round 10): a practice draft seeded
 	// from the pick bar creates its session WITH the graph context — the
 	// same contract as the home screen's practice send (the marker with
 	// [id] name: statement lines, target validation's truth set).
 	return starter.start(
 		mode === "practice"
-			? { title: t, kind: "practice", ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
-			: { title: t },
+			? { title: t, kind: "practice", ...coursePart, ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
+			: { title: t, ...coursePart },
 		fetchLike,
 		settingsIdentity,
 	);
@@ -241,6 +244,8 @@ export function DraftShell({
 
 export function NewSession({ initialConfigured, mode = "teach" }: { initialConfigured: boolean; mode?: "teach" | "practice" }) {
 	const router = useRouter();
+	const { filter, activeCourseId, revision, refresh: refreshCourses } = useCourses();
+	const courseQuery = courseQueryParam(filter);
 	const [text, setText] = useState("");
 	/* The draft MIRROR ("nothing gets lost" round, 2026-10-01): the shell's
 	 * finish-first send calls THIS send after the dictation flush — which
@@ -266,15 +271,41 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	};
 	const [pickerOpen, setPickerOpen] = useState(false);
 	const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
+	const snapshotScopeRef = useRef<string>("");
+	const fetchSnapshot = useCallback(
+		(scopeKey: string) =>
+			fetch(`/api/graph${courseQuery}`)
+				.then((r) => {
+					if (!r.ok) {
+						if (r.status === 404 && filter.kind === "course") void refreshCourses();
+						throw new Error(`Graph fetch failed (${r.status})`);
+					}
+					return r.json() as Promise<GraphSnapshot>;
+				})
+				.then((snap) => {
+					snapshotScopeRef.current = scopeKey;
+					setSnapshot(snap);
+					return snap;
+				}),
+		[courseQuery, filter.kind, refreshCourses],
+	);
+	useEffect(() => {
+		const scopeKey = `${courseQuery}:${revision}`;
+		if (snapshotScopeRef.current === scopeKey) return;
+		if (pickerOpen) {
+			void fetchSnapshot(scopeKey).catch(() => {});
+		} else {
+			setSnapshot(null);
+		}
+	}, [courseQuery, revision, pickerOpen, fetchSnapshot]);
 	const openPicker = () => {
-		if (snapshot) {
+		const scopeKey = `${courseQuery}:${revision}`;
+		if (snapshot && snapshotScopeRef.current === scopeKey) {
 			setPickerOpen(true);
 			return;
 		}
-		void fetch("/api/graph")
-			.then((r) => r.json() as Promise<GraphSnapshot>)
-			.then((snap) => {
-				setSnapshot(snap);
+		void fetchSnapshot(scopeKey)
+			.then(() => {
 				setPickerOpen(true);
 			})
 			.catch(() => {
@@ -316,17 +347,19 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		setBusy(true);
 		setStartError(false);
 		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined,
-			starterRef.current, JSON.stringify(catalog?.slots.strong))
+			starterRef.current, JSON.stringify(catalog?.slots.strong), activeCourseId)
 			.then((target) => {
-				if (target) router.push(target);
-				else { startingRef.current = false; setBusy(false); }
+				if (target) {
+					if (activeCourseId) void refreshCourses();
+					router.push(target);
+				} else { startingRef.current = false; setBusy(false); }
 			})
 			.catch(() => {
 				startingRef.current = false;
 				setBusy(false);
 				setStartError(true);
 			});
-	}, [router, configured, zeroKeys, catalog, mode]);
+	}, [router, configured, zeroKeys, catalog, mode, activeCourseId, refreshCourses]);
 
 	return (
 		<>
