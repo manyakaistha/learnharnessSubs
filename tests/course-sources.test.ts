@@ -472,3 +472,25 @@ it("assigns membership only on first discovery so moved or unassigned sources do
 	assert.equal(finalState.membership[srcNoCourse], undefined, "move to No course survives file edit and rescan");
 	assert.equal(finalState.membership[srcDuring], undefined, "move during re-extraction is kept");
 });
+
+it("scans an attached folder whose own path is hidden while skipping dot-prefixed entries during traversal", async () => {
+	const hiddenFolder = path.join(root, ".hidden-vault");
+	const visible = writeText(path.join(hiddenFolder, "lecture.md"), "# Lecture");
+	const nested = writeText(path.join(hiddenFolder, "sub", "details.md"), "# Details");
+	writeText(path.join(hiddenFolder, ".hidden.md"), "skip dot file");
+	writeText(path.join(hiddenFolder, ".obsidian", "app.md"), "skip obsidian");
+	writeText(path.join(hiddenFolder, ".hidden-sub", "note.md"), "skip dot dir");
+
+	const { courseId } = createCourseWithFolder("HiddenRoot", hiddenFolder);
+	const seen: string[] = [];
+	setCourseExtractorForTests(async ({ filePath }) => {
+		seen.push(filePath);
+		return { nodes: 1, chains: 0 };
+	});
+
+	startCourseScan(courseId);
+	while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+
+	assert.deepEqual(seen, [".hidden-vault/lecture.md", ".hidden-vault/sub/details.md"]);
+	assert.deepEqual(courseFileStatuses(courseId).map((s) => s.path).sort(), [visible, nested].sort());
+});

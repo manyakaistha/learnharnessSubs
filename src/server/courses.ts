@@ -314,13 +314,21 @@ function sanitizeUploadFilename(rawName: string): string {
 		throw new CourseInputError("File name must not contain path separators.");
 	}
 	const base = path.basename(rawName);
-	if (!base || base === "." || base === ".." || base !== rawName || base.startsWith(".")) {
+	if (!base || base === "." || base === ".." || base !== rawName) {
 		throw new CourseInputError("Invalid file name.");
 	}
-	if (Buffer.byteLength(base, "utf8") > MAX_UPLOAD_FILENAME_BYTES) {
+	// Block dotenv names before stripping leading dots so `.env.md` cannot bypass ENV_FILE.
+	if (isSensitivePath(path.join("/", base))) {
+		throw new CourseInputError("File name is not allowed.");
+	}
+	const stripped = base.replace(/^\.+/, "");
+	if (!stripped || !stripped.trim()) {
+		throw new CourseInputError("Invalid file name.");
+	}
+	if (Buffer.byteLength(stripped, "utf8") > MAX_UPLOAD_FILENAME_BYTES) {
 		throw new CourseInputError("File name is too long.");
 	}
-	return base;
+	return stripped;
 }
 
 function oversizeUploadMessage(): string {

@@ -31,6 +31,7 @@ Owner-approved design (2026-11-20). Shared spec for every courses work package.
 - **Moving sources:** sessions move between courses from the session row menu ("Move to course"). Imported files move with the Course picker on their row in the Chains source tree.
 - **Overlapping folders:** a folder may belong to only one course. Attaching a folder that equals, contains, or is inside any course's attached folder is rejected, because file identity is global per path.
 - **Scan containment:** scans never follow symlinks outside the attached folder or into credential locations. Two links to the same file extract once.
+- **Hidden items:** scans skip every dot-prefixed file or directory found during traversal (`.obsidian`, app settings rather than notes, is intentionally skipped), while an attached folder whose own path is hidden is scanned; uploads strip leading dots from the stored copy name (e.g. `.notes.md` → `notes.md`, rejecting empty results) so scans pick them up.
 - **Rescans:** a rescan requested while a scan runs queues exactly one follow-up pass. Reopening the app with a course already active rescans it once.
 - **Deleting while extracting:** "Also delete this course's sessions and files" is refused (409) while the course's folders are still extracting.
 - **Course graph provenance:** a course graph (and "No course") carries only in-scope provenance, so clusters and session lists never name an out-of-scope session.

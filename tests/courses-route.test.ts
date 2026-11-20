@@ -572,10 +572,31 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 	assert.equal((await uploadFiles({ files: [{ name: "a.md", body: "hi" }] })).status, 400);
 	assert.equal((await uploadFiles({ courseId: "crs_missing", files: [{ name: "a.md", body: "hi" }] })).status, 400);
 	assert.equal((await uploadFiles({ courseId, files: [] })).status, 400);
-	for (const badName of ["", ".", "..", "sub/a.md", "../a.md", "a\\b.md", "a\0b.md", ".env.md", ".hidden.md", "slides.pptx", "img.png"]) {
+	for (const badName of ["", ".", "..", "...", ".   ", ".md", "sub/a.md", "../a.md", "a\\b.md", "a\0b.md", ".env.md", "slides.pptx", "img.png"]) {
 		const badRes = await uploadFiles({ courseId, files: [{ name: badName, body: "hi" }] });
 		assert.equal(badRes.status, 400, `expected 400 for filename ${JSON.stringify(badName)}`);
 	}
+
+	// Dot-prefixed uploads strip leading dots (with clash suffixing) so scans pick them up
+	extracted.length = 0;
+	const dotRes = await uploadFiles({
+		courseId,
+		files: [
+			{ name: ".notes.md", body: "# Dot notes 1" },
+			{ name: "..notes.md", body: "# Dot notes 2" },
+		],
+	});
+	assert.equal(dotRes.status, 200);
+	const dotBody = await dotRes.json();
+	assert.deepEqual(dotBody.copied, [
+		path.join(expectedDir, "notes.md"),
+		path.join(expectedDir, "notes (2).md"),
+	]);
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(
+		extracted.map((e) => e.filePath).sort(),
+		[`${courseId}/notes (2).md`, `${courseId}/notes.md`],
+	);
 
 	// Single file > MAX_IMPORT_BYTES -> 413
 	const hugeFileRes = await uploadFiles({
@@ -599,7 +620,7 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 	assert.equal(streamRes.status, 413);
 	assert.equal(cancelled, true);
 	// No partial files left behind from failed uploads
-	assert.deepEqual(fs.readdirSync(expectedDir).sort(), ["week1 (2).md", "week1 (3).md", "week1.md"]);
+	assert.deepEqual(fs.readdirSync(expectedDir).sort(), ["notes (2).md", "notes.md", "week1 (2).md", "week1 (3).md", "week1.md"]);
 });
 
 it("deleting a course-folder source excludes it across rescans until include-file re-extracts it", async () => {
