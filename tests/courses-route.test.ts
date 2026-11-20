@@ -11,14 +11,18 @@ fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 const coursesRoute = await import("../app/api/courses/route.ts");
+const courseFilesRoute = await import("../app/api/courses/files/route.ts");
 const chatsRoute = await import("../app/api/chats/route.ts");
 const chatByIdRoute = await import("../app/api/chats/[id]/route.ts");
 const graphRoute = await import("../app/api/graph/route.ts");
 const sourcesRoute = await import("../app/api/graph/sources/route.ts");
 const { stores } = await import("../src/server/stores.ts");
-const { COURSES_FILE } = await import("../config.ts");
+const { setCourseExtractorForTests, waitForCourseScanForTests } = await import("../src/server/course-sources.ts");
+const { COURSE_FILES_DIR, COURSES_FILE } = await import("../config.ts");
+const { MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES } = await import("../lib/notes-import-limits.ts");
 
 beforeEach(() => {
+	setCourseExtractorForTests(null);
 	fs.rmSync(root, { recursive: true, force: true });
 	fs.mkdirSync(root, { recursive: true });
 	fs.writeFileSync(process.env.LH_AUTH_FILE!, "{}\n");
@@ -470,4 +474,104 @@ it("attach-session-files validates course membership, regular files, ~ expansion
 		if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
 		if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
 	}
+});
+
+it("POST /api/courses/files copies with clash suffixes, attaches managed folder once, scans, grants chatId, and rejects bad inputs", async () => {
+	const courseId = (await (await postCourse({ action: "create", name: "ML" })).json()).courses[0].id as string;
+	const otherCourseId = (await (await postCourse({ action: "create", name: "Other" })).json()).courses.find((c: { name: string }) => c.name === "Other").id as string;
+	const chatMl = stores.chatStore.createChat("ML session");
+	const chatOther = stores.chatStore.createChat("Other session");
+	await postCourse({ action: "assign", sourceId: chatMl.id, courseId });
+	await postCourse({ action: "assign", sourceId: chatOther.id, courseId: otherCourseId });
+
+	const extracted: Array<{ sourceId: string; filePath: string; text: string }> = [];
+	setCourseExtractorForTests(async (input) => {
+		extracted.push(input);
+		return { nodes: 1, chains: 0 };
+	});
+
+	const uploadFiles = (fields: { courseId?: string; chatId?: string; files: Array<{ name: string; body: Uint8Array | string }> }) => {
+		const form = new FormData();
+		if (fields.courseId !== undefined) form.append("courseId", fields.courseId);
+		if (fields.chatId !== undefined) form.append("chatId", fields.chatId);
+		for (const f of fields.files) form.append("files", new File([f.body], f.name));
+		return courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	};
+
+	// First upload creates managed folder, attaches it once with managed: true, copies files, grants chatId, starts scan
+	const res1 = await uploadFiles({
+		courseId,
+		chatId: chatMl.id,
+		files: [
+			{ name: "week1.md", body: "# Week 1" },
+			{ name: "week1.md", body: "# Week 1 duplicate" },
+		],
+	});
+	assert.equal(res1.status, 200);
+	const body1 = await res1.json();
+	const expectedDir = path.join(COURSE_FILES_DIR, courseId);
+	assert.deepEqual(body1.copied, [
+		path.join(expectedDir, "week1.md"),
+		path.join(expectedDir, "week1 (2).md"),
+	]);
+	const mlCourse1 = body1.courses.find((c: { id: string }) => c.id === courseId);
+	assert.equal(mlCourse1.folders.length, 1);
+	assert.equal(mlCourse1.folders[0].path, expectedDir);
+	assert.equal(mlCourse1.folders[0].managed, true);
+	assert.equal(mlCourse1.scanning, true);
+	assert.equal(fs.readFileSync(path.join(expectedDir, "week1.md"), "utf8"), "# Week 1");
+	assert.equal(fs.readFileSync(path.join(expectedDir, "week1 (2).md"), "utf8"), "# Week 1 duplicate");
+	assert.deepEqual(stores.courseStore.read().sessionFiles[chatMl.id], body1.copied);
+
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(
+		extracted.map((e) => e.filePath).sort(),
+		[`${courseId}/week1 (2).md`, `${courseId}/week1.md`],
+	);
+
+	// Second upload reuses existing managed folder (still 1 folder), increments clash suffix, ignores non-course chatId
+	const res2 = await uploadFiles({
+		courseId,
+		chatId: chatOther.id,
+		files: [{ name: "week1.md", body: "# Week 1 v3" }],
+	});
+	assert.equal(res2.status, 200);
+	const body2 = await res2.json();
+	assert.deepEqual(body2.copied, [path.join(expectedDir, "week1 (3).md")]);
+	assert.equal(body2.courses.find((c: { id: string }) => c.id === courseId).folders.length, 1);
+	assert.equal(stores.courseStore.read().sessionFiles[chatOther.id], undefined);
+	await waitForCourseScanForTests(courseId);
+
+	// Validation errors: missing/unknown courseId, no files, bad filenames, unsupported types, oversize
+	assert.equal((await uploadFiles({ files: [{ name: "a.md", body: "hi" }] })).status, 400);
+	assert.equal((await uploadFiles({ courseId: "crs_missing", files: [{ name: "a.md", body: "hi" }] })).status, 400);
+	assert.equal((await uploadFiles({ courseId, files: [] })).status, 400);
+	for (const badName of ["", ".", "..", "sub/a.md", "../a.md", "a\\b.md", "a\0b.md", ".env.md", ".hidden.md", "slides.pptx", "img.png"]) {
+		const badRes = await uploadFiles({ courseId, files: [{ name: badName, body: "hi" }] });
+		assert.equal(badRes.status, 400, `expected 400 for filename ${JSON.stringify(badName)}`);
+	}
+
+	// Single file > MAX_IMPORT_BYTES -> 413
+	const hugeFileRes = await uploadFiles({
+		courseId,
+		files: [{ name: "huge.md", body: new Uint8Array(MAX_IMPORT_BYTES + 1) }],
+	});
+	assert.equal(hugeFileRes.status, 413);
+
+	// Streamed body > MAX_IMPORT_BODY_BYTES -> 413
+	let cancelled = false;
+	const hugeStreamReq = new Request("http://localhost/api/courses/files", {
+		method: "POST",
+		duplex: "half",
+		headers: { "content-type": "multipart/form-data; boundary=test", "content-length": "1" },
+		body: new ReadableStream<Uint8Array>({
+			pull(controller) { controller.enqueue(new Uint8Array(1024 * 1024)); },
+			cancel() { cancelled = true; },
+		}, { highWaterMark: 0 }),
+	} as RequestInit);
+	const streamRes = await courseFilesRoute.POST(hugeStreamReq);
+	assert.equal(streamRes.status, 413);
+	assert.equal(cancelled, true);
+	// No partial files left behind from failed uploads
+	assert.deepEqual(fs.readdirSync(expectedDir).sort(), ["week1 (2).md", "week1 (3).md", "week1.md"]);
 });

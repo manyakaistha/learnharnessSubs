@@ -84,6 +84,8 @@ export const SOURCE_ORGANIZATION_FILE = path.join(/* turbopackIgnore: true */ PA
 /** Courses (core/contracts/courses.ts): course list, source membership, and
  *  course-folder extraction bookkeeping. A projection over the graph, never identity. */
 export const COURSES_FILE = path.join(/* turbopackIgnore: true */ PATHS.graph, "courses.json");
+/** Managed copies uploaded via POST /api/courses/files (`<data>/course-files/<courseId>/`). */
+export const COURSE_FILES_DIR = path.join(/* turbopackIgnore: true */ DATA_ROOT, "course-files");
 /** The layout ledger (read-modify-write like sources.json): nodeId →
  *  {x,y} resting positions from the incremental settle (core/layout.ts).
  *  Carries an updatedAt stamp for future live-physics conflict handling. */
