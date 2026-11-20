@@ -406,3 +406,69 @@ it("a file excluded while the scan runs is skipped, and an exclusion recorded mi
 	const statuses = Object.fromEntries(courseFileStatuses(courseId).map((s) => [path.basename(s.path), s.state]));
 	assert.deepEqual(statuses, { "a.md": "extracted", "b.md": "excluded", "c.md": "excluded" });
 });
+
+it("assigns membership only on first discovery so moved or unassigned sources do not revert on re-extraction", async () => {
+	const folder = path.join(root, "moved-sources");
+	const fMoveB = writeText(path.join(folder, "move_to_b.md"), "# Move B v1");
+	const fNoCourse = writeText(path.join(folder, "move_to_none.md"), "# Move None v1");
+	const fDuring = writeText(path.join(folder, "move_during.md"), "# Move During v1");
+	const fFirstDuring = writeText(path.join(folder, "first_during.md"), "# First During v1");
+
+	const { courseId: courseA } = createCourseWithFolder("CourseA", folder);
+	let state = stores.courseStore.read();
+	state = applyCourseAction(state, { action: "create", name: "CourseB" }, { id: "crs_b_move", at: "2026-11-20T00:00:00Z" });
+	stores.courseStore.write(state);
+	const courseB = "crs_b_move";
+
+	setCourseExtractorForTests(async ({ filePath }) => {
+		if (filePath.endsWith("first_during.md")) {
+			const cur = stores.courseStore.read();
+			stores.courseStore.write(applyCourseAction(cur, {
+				action: "assign",
+				sourceId: courseFileSourceId(fFirstDuring),
+				courseId: courseB,
+			}, fresh()));
+		}
+		return { nodes: 1, chains: 0 };
+	});
+
+	startCourseScan(courseA);
+	while (courseScanning(courseA)) await waitForCourseScanForTests(courseA);
+
+	const srcMoveB = courseFileSourceId(fMoveB);
+	const srcNoCourse = courseFileSourceId(fNoCourse);
+	const srcDuring = courseFileSourceId(fDuring);
+	const srcFirstDuring = courseFileSourceId(fFirstDuring);
+
+	state = stores.courseStore.read();
+	assert.equal(state.membership[srcMoveB], courseA);
+	assert.equal(state.membership[srcNoCourse], courseA);
+	assert.equal(state.membership[srcDuring], courseA);
+	assert.equal(state.membership[srcFirstDuring], courseB, "membership assigned during first discovery is kept");
+
+	// Move fMoveB -> CourseB and fNoCourse -> No course BEFORE modifying files & rescanning A
+	state = applyCourseAction(state, { action: "assign", sourceId: srcMoveB, courseId: courseB }, fresh());
+	state = applyCourseAction(state, { action: "assign", sourceId: srcNoCourse, courseId: null }, fresh());
+	stores.courseStore.write(state);
+
+	writeText(fMoveB, "# Move B v2");
+	writeText(fNoCourse, "# Move None v2");
+	writeText(fDuring, "# Move During v2");
+
+	// Move fDuring -> No course DURING re-extraction
+	setCourseExtractorForTests(async ({ filePath }) => {
+		if (filePath.endsWith("move_during.md")) {
+			const cur = stores.courseStore.read();
+			stores.courseStore.write(applyCourseAction(cur, { action: "assign", sourceId: srcDuring, courseId: null }, fresh()));
+		}
+		return { nodes: 1, chains: 0 };
+	});
+
+	startCourseScan(courseA);
+	while (courseScanning(courseA)) await waitForCourseScanForTests(courseA);
+
+	const finalState = stores.courseStore.read();
+	assert.equal(finalState.membership[srcMoveB], courseB, "A->B move survives file edit and rescan");
+	assert.equal(finalState.membership[srcNoCourse], undefined, "move to No course survives file edit and rescan");
+	assert.equal(finalState.membership[srcDuring], undefined, "move during re-extraction is kept");
+});

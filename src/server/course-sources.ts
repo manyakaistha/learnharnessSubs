@@ -292,6 +292,7 @@ async function runCourseScan(courseId: string): Promise<void> {
 				emit("courses-changed", {});
 				continue;
 			}
+			const hadFolderFileBefore = Object.hasOwn(beforeState.folderFiles, item.absPath);
 
 			setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "extracting" });
 			emit("courses-changed", {});
@@ -360,9 +361,10 @@ async function runCourseScan(courseId: string): Promise<void> {
 				}
 
 				setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "extracted" });
+				const assignMembership = !hadFolderFileBefore && !Object.hasOwn(latest.membership, sourceId);
 				const nextState: CourseState = {
 					...latest,
-					membership: { ...latest.membership, [sourceId]: courseId },
+					membership: assignMembership ? { ...latest.membership, [sourceId]: courseId } : latest.membership,
 					folderFiles: {
 						...latest.folderFiles,
 						[item.absPath]: {
