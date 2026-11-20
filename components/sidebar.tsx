@@ -978,7 +978,7 @@ export function SessionsSidebar() {
 						{moveCourseOpen && (() => {
 							const ctxChat = chats?.find((c) => c.id === ctxChatId);
 							const currentCourseId = ctxChat
-								? effectiveChatCourseId(ctxChat, membership)
+								? effectiveChatCourseId(ctxChat, membership, coursesLoaded)
 								: (membership[ctxChatId] ?? null);
 							const assign = (targetCourseId: string | null) => {
 								const chatId = ctxChatId;

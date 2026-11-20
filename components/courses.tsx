@@ -107,13 +107,15 @@ export function activeCourseIdOf(filter: CourseFilter): string | null {
 	return filter.kind === "course" ? filter.courseId : null;
 }
 
-/** Resolve a chat's effective course id, preferring server membership when present. */
+/** Resolve a chat's effective course id; once course membership has loaded,
+ * absence from `membership` means unassigned (never fall back to stale chat.courseId). */
 export function effectiveChatCourseId(
 	chat: { id: string; courseId?: string | null },
 	membership: Readonly<Record<string, string>>,
+	loaded = false,
 ): string | null {
 	if (Object.hasOwn(membership, chat.id)) return membership[chat.id]!;
-	return chat.courseId ?? null;
+	return loaded ? null : (chat.courseId ?? null);
 }
 
 /** Whether a chat row is visible in the sidebar/home summary under the active course filter. */
@@ -125,7 +127,7 @@ export function chatMatchesCourseFilter(
 	loaded = false,
 ): boolean {
 	if (filter.kind === "all") return true;
-	const cid = effectiveChatCourseId(chat, membership);
+	const cid = effectiveChatCourseId(chat, membership, loaded);
 	if (filter.kind === "none") {
 		if (cid === null) return true;
 		return loaded && courses !== undefined && !courses.some((c) => c.id === cid);

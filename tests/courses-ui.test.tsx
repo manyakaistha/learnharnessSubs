@@ -14,6 +14,7 @@ import {
 	activeCourseIdOf,
 	chatMatchesCourseFilter,
 	courseQueryParam,
+	effectiveChatCourseId,
 	parseStoredCourseFilter,
 	reconcileCourseFilter,
 	serializeCourseFilter,
@@ -262,6 +263,11 @@ describe("courses pure helpers", () => {
 		assert.equal(chatMatchesCourseFilter({ id: "c_orphan", courseId: "crs_gone" }, { kind: "none" }, membership, courses, true), true);
 		assert.equal(chatMatchesCourseFilter({ id: "c_assigned" }, { kind: "course", courseId: "crs_1" }, membership, courses, true), true);
 		assert.equal(chatMatchesCourseFilter({ id: "c_free" }, { kind: "course", courseId: "crs_1" }, membership, courses, true), false);
+		// Once loaded, absence from membership means unassigned even with a stale chat.courseId
+		assert.equal(effectiveChatCourseId({ id: "c_stale", courseId: "crs_1" }, membership, false), "crs_1");
+		assert.equal(effectiveChatCourseId({ id: "c_stale", courseId: "crs_1" }, membership, true), null);
+		assert.equal(chatMatchesCourseFilter({ id: "c_stale", courseId: "crs_1" }, { kind: "none" }, membership, courses, true), true);
+		assert.equal(chatMatchesCourseFilter({ id: "c_stale", courseId: "crs_1" }, { kind: "course", courseId: "crs_1" }, membership, courses, true), false);
 	});
 });
 
@@ -484,6 +490,58 @@ describe("SessionsSidebar filtering, empty state, and Move to course", () => {
 		assert.match(document.querySelector('[data-testid="course-empty-hint"]')!.textContent!, /Start a session/);
 		await clickTestId("course-empty-attach");
 		assert.ok(document.querySelector('[data-testid="course-panel-dialog"]'));
+	});
+
+	it("shows a session moved to No course in No course without refetching /api/chats", async () => {
+		localStorageStub.setItem("lh:sidebar-open", "1");
+		let view: CoursesView = {
+			courses: [makeCourse("crs_cv", "CV")],
+			membership: { c_cv: "crs_cv" },
+		};
+		// /api/chats keeps returning stale courseId: "crs_cv" to prove sidebar trusts loaded membership
+		const chats: ChatListItem[] = [makeChat("c_cv", "Convolution Lecture", "crs_cv")];
+		let chatsFetchCount = 0;
+		let dispatchCoursesChanged!: () => void;
+		const hubSource = (): NotifySource => ({
+			close() {},
+			onOpen() {},
+			onEvent(name, cb) {
+				if (name === "courses-changed") dispatchCoursesChanged = () => cb("{}");
+			},
+		});
+		globalThis.fetch = async (url) => {
+			if (url === "/api/courses") return Response.json(view);
+			if (url === "/api/chats") {
+				chatsFetchCount++;
+				return Response.json({ chats });
+			}
+			if (url === "/api/activity") return Response.json({ jobs: [], extractions: [], pluginWorkers: [] });
+			if (String(url).startsWith("/api/chats/") && String(url).endsWith("/coverage")) {
+				return Response.json({ covered: 0, total: 0 });
+			}
+			return Response.json({});
+		};
+
+		await mountWithProviders(<SessionsSidebar />, { withShellContexts: true, connect: hubSource });
+		const rowTitles = () => [...document.querySelectorAll('[data-testid="session-row"]')].map((el) => el.textContent);
+
+		await clickTestId("course-switcher-trigger");
+		await clickTestId("course-option-none");
+		assert.equal(rowTitles().length, 0, "before move, c_cv is not in No course");
+
+		const initialChatsFetches = chatsFetchCount;
+		// Server updates courses membership (moving c_cv to No course) without any /api/chats refetch
+		view = { courses: [makeCourse("crs_cv", "CV")], membership: {} };
+		await act(async () => { dispatchCoursesChanged(); });
+
+		assert.equal(chatsFetchCount, initialChatsFetches, "/api/chats must not be refetched");
+		assert.equal(rowTitles().length, 1, "c_cv appears in No course immediately");
+		assert.match(rowTitles()[0]!, /Convolution Lecture/);
+
+		// Switching to CV no longer shows c_cv either
+		await clickTestId("course-switcher-trigger");
+		await clickTestId("course-option-crs_cv");
+		assert.equal(rowTitles().length, 0);
 	});
 });
 
