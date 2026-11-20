@@ -69,18 +69,20 @@ it("sessionFiles grants access for that chat only and works with read, ls, find,
 	fs.writeFileSync(attachedFile, "Session handout needle\n");
 	fs.writeFileSync(siblingFile, "Sibling secret needle\n");
 	fs.writeFileSync(cvNote, "CV folder needle\n");
+	// The server records grants canonically (attach-session-files stores realpath).
+	const grant = fs.realpathSync.native(attachedFile);
 
-	let withSession = applyCourseAction(s, { action: "attach-session-files", chatId: "chat_cv", paths: [attachedFile] }, { id: "", at: "t" });
-	withSession = applyCourseAction(withSession, { action: "attach-session-files", chatId: "chat_empty", paths: [attachedFile] }, { id: "", at: "t" });
+	let withSession = applyCourseAction(s, { action: "attach-session-files", chatId: "chat_cv", paths: [grant] }, { id: "", at: "t" });
+	withSession = applyCourseAction(withSession, { action: "attach-session-files", chatId: "chat_empty", paths: [grant] }, { id: "", at: "t" });
 	// An entry for a no-course chat must never affect its policy
-	withSession = applyCourseAction(withSession, { action: "attach-session-files", chatId: "chat_free", paths: [attachedFile] }, { id: "", at: "t" });
+	withSession = applyCourseAction(withSession, { action: "attach-session-files", chatId: "chat_free", paths: [grant] }, { id: "", at: "t" });
 	courseStore.write(withSession);
 	setFileAccessPolicy(fileAccessPolicy);
 
 	try {
-		assert.deepEqual(fileAccessPolicy("chat_cv"), { restricted: true, folders: [path.resolve(cvDir), path.resolve(attachedFile)] });
+		assert.deepEqual(fileAccessPolicy("chat_cv"), { restricted: true, folders: [path.resolve(cvDir)], files: [grant] });
 		assert.deepEqual(fileAccessPolicy("chat_vla"), { restricted: true, folders: [path.resolve(vlaDir), path.resolve(cvDir)] });
-		assert.deepEqual(fileAccessPolicy("chat_empty"), { restricted: true, folders: [path.resolve(attachedFile)] });
+		assert.deepEqual(fileAccessPolicy("chat_empty"), { restricted: true, folders: [], files: [grant] });
 		assert.deepEqual(fileAccessPolicy("chat_free"), fileAccessPolicy(), "no-course chat ignores sessionFiles");
 
 		const resolved = resolvePolicy(fileAccessPolicy("chat_cv"));
@@ -144,4 +146,22 @@ it("prompt segment puts session-attached files at the top for that chat only and
 	assert.match(emptyWithFiles, /Attached for this session — rank these highest:\n- \/tmp\/priority-notes\.md/);
 
 	assert.equal(coursePromptSegmentForSource(withSession, "chat_free"), null);
+});
+
+it("a session-file grant swapped for a symlink is refused, never promoted to a directory root", () => {
+	const dir = fs.mkdtempSync(path.join(root, "swap-"));
+	const privateDir = fs.mkdtempSync(path.join(root, "private-"));
+	fs.writeFileSync(path.join(privateDir, "diary.md"), "private\n");
+	const lecture = path.join(dir, "lecture.txt");
+	fs.writeFileSync(lecture, "lecture\n");
+	const grant = fs.realpathSync.native(lecture);
+	const before = resolvePolicy({ restricted: true, folders: [], files: [grant] });
+	assert.equal(guardSourcePath(lecture, before), grant);
+	fs.rmSync(lecture);
+	fs.symlinkSync(privateDir, lecture);
+	const after = resolvePolicy({ restricted: true, folders: [], files: [grant] });
+	assert.deepEqual(after.folders, []);
+	assert.match(after.unavailable.join(), /Unavailable attached file/);
+	assert.throws(() => guardSourcePath(path.join(lecture, "diary.md"), after), /Access denied/);
+	assert.throws(() => guardSourcePath(path.join(privateDir, "diary.md"), after), /Access denied/);
 });

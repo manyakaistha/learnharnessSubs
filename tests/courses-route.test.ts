@@ -399,7 +399,7 @@ it("source deletion removes membership and marks folderFiles entries excluded in
 	assert.equal(afterState.membership[chatKeep.id], cId);
 	assert.equal(afterState.sessionFiles[chatDrop.id], undefined);
 	assert.equal(afterState.sessionFiles[chatRouteDel.id], undefined);
-	assert.deepEqual(afterState.sessionFiles[chatKeep.id], [path.resolve(attachedSessionFile)]);
+	assert.deepEqual(afterState.sessionFiles[chatKeep.id], [fs.realpathSync.native(attachedSessionFile)]);
 	assert.deepEqual(afterState.folderFiles["/tmp/file1.md"], {
 		courseId: cId,
 		folderId: "cfld_1",
@@ -482,8 +482,8 @@ it("attach-session-files validates course membership, regular files, ~ expansion
 		});
 		assert.equal(res.status, 200);
 		assert.deepEqual(stores.courseStore.read().sessionFiles[courseChat.id], [
-			path.resolve(okFile),
-			path.resolve(homeFile),
+			fs.realpathSync.native(okFile),
+			fs.realpathSync.native(homeFile),
 		]);
 	} finally {
 		if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
@@ -536,7 +536,7 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 	assert.equal(mlCourse1.scanning, true);
 	assert.equal(fs.readFileSync(path.join(expectedDir, "week1.md"), "utf8"), "# Week 1");
 	assert.equal(fs.readFileSync(path.join(expectedDir, "week1 (2).md"), "utf8"), "# Week 1 duplicate");
-	assert.deepEqual(stores.courseStore.read().sessionFiles[chatMl.id], body1.copied);
+	assert.deepEqual(stores.courseStore.read().sessionFiles[chatMl.id], body1.copied.map((p: string) => fs.realpathSync.native(p)));
 
 	await waitForCourseScanForTests(courseId);
 	assert.deepEqual(
@@ -684,7 +684,7 @@ it("course delete removes managed folder on delete-sources (with containment) an
 	assert.equal(delUngroup.status, 200);
 	assert.equal(fs.existsSync(copied1), true);
 	assert.equal(stores.graphStore.readSources().some((s) => s.id === courseFileSourceId(copied1)), true);
-	assert.deepEqual(stores.courseStore.read().sessionFiles[chat1.id], [copied1]);
+	assert.deepEqual(stores.courseStore.read().sessionFiles[chat1.id], [fs.realpathSync.native(copied1)]);
 
 	// Course 2: delete-sources removes managed folder inside COURSE_FILES_DIR, never user folders or outside paths
 	const c2 = (await (await postCourse({ action: "create", name: "RemoveCopies" })).json()).courses[0].id as string;
@@ -720,4 +720,18 @@ it("course delete removes managed folder on delete-sources (with containment) an
 	assert.equal(fs.existsSync(extFile), true, "user-attached external folder must never be deleted");
 	assert.equal(fs.existsSync(outsideFile), true, "containment guard must protect paths outside COURSE_FILES_DIR");
 	assert.equal(stores.graphStore.readSources().some((s) => s.id === courseFileSourceId(copied2)), false);
+});
+
+it("POST /api/courses/files refuses a symlinked managed course folder and writes nothing through it", async () => {
+	const courseId = (await (await postCourse({ action: "create", name: "LinkTrap" })).json()).courses.find((c: { name: string }) => c.name === "LinkTrap").id as string;
+	const elsewhere = fs.mkdtempSync(path.join(root, "elsewhere-"));
+	fs.mkdirSync(COURSE_FILES_DIR, { recursive: true });
+	fs.symlinkSync(elsewhere, path.join(COURSE_FILES_DIR, courseId));
+	const form = new FormData();
+	form.append("courseId", courseId);
+	form.append("files", new File(["# hi"], "notes.md"));
+	const res = await courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	assert.equal(res.status, 400);
+	assert.match((await res.json()).error, /managed file folder/);
+	assert.deepEqual(fs.readdirSync(elsewhere), [], "nothing written through the link");
 });

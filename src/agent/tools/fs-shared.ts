@@ -163,15 +163,24 @@ function sourcePathCheck(home = os.homedir()): (absolute: string) => boolean {
 		files.some((p) => isWithin(absolute, p)) || isCredentialTemp(absolute, credentialDir, path.basename(comparisonPath(AUTH_FILE)));
 }
 
+/** The file tools' named AND canonical denials as one reusable predicate:
+ * build once per walk (it resolves the protected roots), then test many
+ * paths. True = protected (or unresolvable, failing closed). */
+export function protectedSourceChecker(home: string = os.homedir()): (absolute: string) => boolean {
+	const denied = sourcePathCheck(home);
+	return (absolute) => {
+		if (denied(absolute)) return true;
+		try {
+			return denied(realOrMissing(absolute));
+		} catch {
+			return true;
+		}
+	};
+}
+
 /** True when `absolute` or its canonical target resolves to a protected location. */
 export function isProtectedSourcePath(absolute: string, home: string = os.homedir()): boolean {
-	const denied = sourcePathCheck(home);
-	if (denied(absolute)) return true;
-	try {
-		return denied(realOrMissing(absolute));
-	} catch {
-		return true;
-	}
+	return protectedSourceChecker(home)(absolute);
 }
 
 function checkedSourcePath(absolute: string, denied: (absolute: string) => boolean): string {

@@ -95,3 +95,24 @@ it("include-file clears only an excluded entry; session files union per chat; ol
 	assert.deepEqual(parseCourseState(legacy).sessionFiles, {});
 	assert.throws(() => parseCourseAction({ action: "attach-session-files", chatId: "c", paths: [] }), /non-empty/);
 });
+
+it("the scan's protected-path predicate catches canonical aliases of protected home locations", async () => {
+	const fsMod = await import("node:fs");
+	const osMod = await import("node:os");
+	const pathMod = await import("node:path");
+	const { protectedSourceChecker } = await import("../src/agent/tools/fs-shared.ts");
+	const base = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), "lh-protected-"));
+	try {
+		const home = pathMod.join(base, "home");
+		const keys = pathMod.join(base, "shared", "keys");
+		fsMod.mkdirSync(home, { recursive: true });
+		fsMod.mkdirSync(keys, { recursive: true });
+		fsMod.writeFileSync(pathMod.join(keys, "notes.txt"), "secret");
+		fsMod.symlinkSync(keys, pathMod.join(home, ".ssh")); // ~/.ssh -> shared/keys
+		const isProtected = protectedSourceChecker(home);
+		assert.equal(isProtected(pathMod.join(keys, "notes.txt")), true, "canonical target of ~/.ssh is protected");
+		assert.equal(isProtected(pathMod.join(base, "shared")), false);
+	} finally {
+		fsMod.rmSync(base, { recursive: true, force: true });
+	}
+});

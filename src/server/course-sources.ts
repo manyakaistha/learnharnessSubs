@@ -11,7 +11,7 @@ import type { CourseFileStatus, CourseFolder, CourseState } from "../core/contra
 import { emit } from "../core/events.ts";
 import { placeImportedSource } from "../core/source-organization.ts";
 import { isWithin } from "../agent/tools/file-access.ts";
-import { isSensitivePath } from "../agent/tools/fs-shared.ts";
+import { protectedSourceChecker } from "../agent/tools/fs-shared.ts";
 import { extraction } from "./chat-handler.ts";
 import { stores } from "./stores.ts";
 
@@ -101,12 +101,15 @@ async function discoverCourseFiles(folders: readonly CourseFolder[]): Promise<Di
 		let realRoot: string;
 		try { realRoot = await fs.realpath(/* turbopackIgnore: true */ path.resolve(folder.path)); }
 		catch { continue; }
-		if (isSensitivePath(realRoot)) continue;
+		// The same named + canonical denials the file tools apply (a home
+		// location like ~/.ssh may itself be a symlink into this folder).
+		const isProtected = protectedSourceChecker();
+		if (isProtected(realRoot)) continue;
 		const visitedDirs = new Set<string>();
 		// Same containment the agent's file tools enforce: a symlink may not
 		// lead outside the attached folder or into credential locations.
 		const allowed = (lexical: string, real: string) =>
-			isWithin(real, realRoot) && !isSensitivePath(real) && !isSensitivePath(lexical);
+			isWithin(real, realRoot) && !isProtected(real) && !isProtected(lexical);
 
 		const walk = async (dir: string): Promise<void> => {
 			let realDir: string;
@@ -283,6 +286,12 @@ async function runCourseScan(courseId: string): Promise<void> {
 				emit("courses-changed", {});
 				continue;
 			}
+			// Deleted (excluded) since the queue was built: honour it.
+			if (beforeState.folderFiles[item.absPath]?.excluded) {
+				setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "excluded" });
+				emit("courses-changed", {});
+				continue;
+			}
 
 			setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "extracting" });
 			emit("courses-changed", {});
@@ -340,6 +349,12 @@ async function runCourseScan(courseId: string): Promise<void> {
 				}
 				if (!latestCourse.folders.some((f) => f.id === item.folder.id)) {
 					removeFileStatus(courseId, item.absPath);
+					emit("courses-changed", {});
+					continue;
+				}
+				// Never overwrite an exclusion recorded while this file extracted.
+				if (latest.folderFiles[item.absPath]?.excluded) {
+					setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "excluded" });
 					emit("courses-changed", {});
 					continue;
 				}

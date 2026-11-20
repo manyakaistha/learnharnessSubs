@@ -30,16 +30,12 @@ export function fileAccessPolicy(chatId?: string): FileAccessPolicy {
 					try { folders.push(expandFolder(folder.path)); }
 					catch { return { restricted: true, folders: [], error: `Invalid course folder path: ${folder.path}` }; }
 				}
-				const sessionPaths = Object.hasOwn(state.sessionFiles, chatId) ? state.sessionFiles[chatId]! : [];
-				for (const filePath of sessionPaths) {
-					try {
-						const expanded = expandFolder(filePath);
-						if (!folders.includes(expanded)) folders.push(expanded);
-					} catch {
-						return { restricted: true, folders: [], error: `Invalid session file path: ${filePath}` };
-					}
+				// Session attachments stay single-file grants (recorded canonical).
+				const files = Object.hasOwn(state.sessionFiles, chatId) ? [...state.sessionFiles[chatId]!] : [];
+				if (files.some((file) => !path.isAbsolute(file) || file.includes("\0"))) {
+					return { restricted: true, folders: [], error: "Invalid session file path." };
 				}
-				return { restricted: true, folders };
+				return files.length > 0 ? { restricted: true, folders, files } : { restricted: true, folders };
 			}
 		}
 	}

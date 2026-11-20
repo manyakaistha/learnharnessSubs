@@ -59,10 +59,12 @@ function resolveSessionFilePath(rawPath: string, home: string = os.homedir()): s
 	} catch {
 		throw new CourseInputError("File does not exist on this machine.");
 	}
-	if (isSensitivePath(normalized) || isSensitivePath(real) || isProtectedSourcePath(normalized)) {
+	if (isSensitivePath(normalized) || isSensitivePath(real) || isProtectedSourcePath(normalized) || isProtectedSourcePath(real)) {
 		throw new CourseInputError("File path points to a protected location.");
 	}
-	return normalized;
+	// Store the CANONICAL path: the policy treats it as one file and refuses
+	// it if it later resolves anywhere else.
+	return real;
 }
 
 function buildCoursesView(state: CourseState): CoursesView {
@@ -281,6 +283,17 @@ export interface AddCourseFilesInput {
 	chatId?: string | null;
 }
 
+async function assertManagedCourseDir(managedRoot: string, managedDir: string): Promise<void> {
+	const refuse = () => { throw new CourseInputError("The course's managed file folder is not a plain folder inside LearnHarness data."); };
+	for (const dir of [managedRoot, managedDir]) {
+		const st = await fsPromises.lstat(/* turbopackIgnore: true */ dir).catch(() => null);
+		if (!st || st.isSymbolicLink() || !st.isDirectory()) refuse();
+	}
+	const realRoot = await fsPromises.realpath(/* turbopackIgnore: true */ managedRoot);
+	const realDir = await fsPromises.realpath(/* turbopackIgnore: true */ managedDir);
+	if (path.dirname(realDir) !== realRoot || path.basename(realDir) !== path.basename(managedDir)) refuse();
+}
+
 /** Copy uploaded files into `<data>/course-files/<courseId>/`, attach the
  * managed folder on first use, optionally grant session access, and scan. */
 export async function addCourseFiles(input: AddCourseFilesInput): Promise<CourseFilesResponse> {
@@ -334,6 +347,9 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 	const copied: string[] = [];
 	try {
 		for (const { filename, bytes } of entries) {
+			// Re-checked before every write: the managed directory must be a
+			// real directory directly inside the managed root, never a link.
+			await assertManagedCourseDir(managedRoot, managedDir);
 			copied.push(await writeUniqueCourseFile(managedDir, filename, bytes));
 		}
 
@@ -353,7 +369,9 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 		}
 
 		if (chatId && stores.chatStore.getChat(chatId) && courseOf(next, chatId) === courseId) {
-			next = applyCourseAction(next, { action: "attach-session-files", chatId, paths: copied }, {
+			// Grants are canonical (the policy refuses a grant that resolves elsewhere).
+			const grants = copied.map((p) => fs.realpathSync.native(/* turbopackIgnore: true */ p));
+			next = applyCourseAction(next, { action: "attach-session-files", chatId, paths: grants }, {
 				id: "",
 				at: new Date().toISOString(),
 			});

@@ -377,3 +377,32 @@ it("excluded files report state 'excluded' even when not scanning and are skippe
 	assert.deepEqual(seen, []);
 	assert.deepEqual(courseFileStatuses(courseId).find((s) => s.path === f2), { path: f2, folderId, state: "excluded" });
 });
+
+it("a file excluded while the scan runs is skipped, and an exclusion recorded mid-extraction is never overwritten", async () => {
+	const folder = path.join(root, "exclude-mid-scan");
+	const a = writeText(path.join(folder, "a.md"), "# a");
+	const b = writeText(path.join(folder, "b.md"), "# b");
+	const c = writeText(path.join(folder, "c.md"), "# c");
+	const { courseId, folderId } = createCourseWithFolder("MidScan", folder);
+	const exclude = (file: string) => {
+		const state = stores.courseStore.read();
+		state.folderFiles[file] = { courseId, folderId, sourceId: courseFileSourceId(file), sha256: "x", extractedAt: "t", excluded: true };
+		stores.courseStore.write(state);
+	};
+	const seen: string[] = [];
+	setCourseExtractorForTests(async ({ filePath }) => {
+		seen.push(filePath);
+		if (filePath.endsWith("a.md")) exclude(b); // b deleted while a extracts
+		if (filePath.endsWith("c.md")) exclude(c); // c deleted while c itself extracts
+		return { nodes: 1, chains: 0 };
+	});
+	startCourseScan(courseId);
+	while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+	assert.deepEqual(seen.map((p) => path.basename(p)), ["a.md", "c.md"], "b is never extracted");
+	const state = stores.courseStore.read();
+	assert.equal(state.folderFiles[b]?.excluded, true);
+	assert.equal(state.folderFiles[c]?.excluded, true, "c's exclusion survives its own extraction commit");
+	assert.equal(state.folderFiles[a]?.excluded, undefined);
+	const statuses = Object.fromEntries(courseFileStatuses(courseId).map((s) => [path.basename(s.path), s.state]));
+	assert.deepEqual(statuses, { "a.md": "extracted", "b.md": "excluded", "c.md": "excluded" });
+});

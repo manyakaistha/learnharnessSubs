@@ -8,6 +8,11 @@ import * as path from "node:path";
 export interface FileAccessPolicy {
 	restricted: boolean;
 	folders: readonly string[];
+	/** Single-file grants (course "this session only" attachments): CANONICAL
+	 * paths recorded at attach time. Each stays a file root: a grant whose
+	 * path now resolves elsewhere (e.g. swapped for a symlink) or to a
+	 * non-file is unavailable, never promoted to a directory root. */
+	files?: readonly string[];
 	error?: string;
 }
 export interface ResolvedFileAccessPolicy {
@@ -28,7 +33,9 @@ export function fileAccessPolicy(chatId?: string): FileAccessPolicy {
 	try { policy = currentPolicy(chatId); }
 	catch { throw new Error("File-access configuration error: preferences cannot be read. Repair File access in Settings → Agent → Tools."); }
 	if (policy?.error) throw new Error(policy.error);
-	if (!policy || typeof policy.restricted !== "boolean" || !Array.isArray(policy.folders) || policy.folders.some((folder) => typeof folder !== "string" || !path.isAbsolute(folder) || folder.includes("\0"))) {
+	const badPath = (entry: unknown) => typeof entry !== "string" || !path.isAbsolute(entry) || entry.includes("\0");
+	if (!policy || typeof policy.restricted !== "boolean" || !Array.isArray(policy.folders) || policy.folders.some(badPath)
+		|| (policy.files !== undefined && (!Array.isArray(policy.files) || policy.files.some(badPath)))) {
 		throw new Error("File-access configuration error: invalid policy. Repair File access in Settings → Agent → Tools.");
 	}
 	return policy;
@@ -83,14 +90,25 @@ export function resolvePolicy(policy: FileAccessPolicy = fileAccessPolicy()): Re
 	for (const folder of policy.folders) {
 		try {
 			const real = fs.realpathSync.native(/* turbopackIgnore: true */ folder);
-			const stat = fs.statSync(/* turbopackIgnore: true */ real);
-			if (!stat.isDirectory() && !stat.isFile()) throw new Error("not a directory or file");
-			fs.accessSync(/* turbopackIgnore: true */ real, stat.isDirectory() ? fs.constants.R_OK | fs.constants.X_OK : fs.constants.R_OK);
-			if (stat.isFile()) fileRoots.add(real);
+			if (!fs.statSync(/* turbopackIgnore: true */ real).isDirectory()) throw new Error("not a directory");
+			fs.accessSync(/* turbopackIgnore: true */ real, fs.constants.R_OK | fs.constants.X_OK);
 			if (folders.some((root) => isWithin(real, root))) continue;
 			for (let i = folders.length - 1; i >= 0; i--) if (isWithin(folders[i]!, real)) folders.splice(i, 1);
 			folders.push(real);
 		} catch { unavailable.push(`Unavailable allowed folder: ${folder}`); }
+	}
+	for (const file of policy.files ?? []) {
+		try {
+			const real = fs.realpathSync.native(/* turbopackIgnore: true */ file);
+			// Identity: the grant was recorded canonical; any redirection since
+			// (a symlink swapped in) makes it unavailable rather than re-aimed.
+			if (comparisonPath(real) !== comparisonPath(file)) throw new Error("grant moved");
+			if (!fs.statSync(/* turbopackIgnore: true */ real).isFile()) throw new Error("not a file");
+			fs.accessSync(/* turbopackIgnore: true */ real, fs.constants.R_OK);
+			if (folders.some((root) => isWithin(real, root))) continue;
+			fileRoots.add(real);
+			folders.push(real);
+		} catch { unavailable.push(`Unavailable attached file: ${file}`); }
 	}
 	const resolved: ResolvedFileAccessPolicy = { restricted: true, folders, unavailable };
 	if (fileRoots.size > 0) {
