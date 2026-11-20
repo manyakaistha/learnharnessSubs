@@ -71,16 +71,21 @@ export function createSourceDirectory(deps: { chatStore: ChatStore; graphStore: 
 
 export const sourceDirectory = createSourceDirectory(stores);
 
+class BoundedJsonTooLargeError extends Error {}
+
 /** Bound actual JSON bytes as well as declared size; never buffer an unbounded
  * operation body. A cancelled tee must not delay the refusal. */
-export async function readOrganizationAction(request: Request): Promise<unknown> {
-	const limit = 64 * 1024;
+export async function readBoundedJsonBody(
+	request: Request,
+	options: { makeError: (message: string) => Error; tooLarge: string; missing: string; invalid: string },
+	limit = 64 * 1024,
+): Promise<unknown> {
 	if (Number(request.headers.get("content-length")) > limit) {
 		void request.body?.cancel().catch(() => undefined);
-		throw new SourceOrganizationInputError("Source organization request is too large.");
+		throw options.makeError(options.tooLarge);
 	}
 	const reader = request.body?.getReader();
-	if (!reader) throw new SourceOrganizationInputError("Missing source organization action.");
+	if (!reader) throw options.makeError(options.missing);
 	const chunks: Uint8Array[] = [];
 	let total = 0;
 	try {
@@ -88,7 +93,7 @@ export async function readOrganizationAction(request: Request): Promise<unknown>
 			const { value, done } = await reader.read();
 			if (done) break;
 			total += value.byteLength;
-			if (total > limit) throw new SourceOrganizationInputError("Source organization request is too large.");
+			if (total > limit) throw new BoundedJsonTooLargeError(options.tooLarge);
 			chunks.push(value);
 		}
 		const bytes = new Uint8Array(total);
@@ -96,10 +101,19 @@ export async function readOrganizationAction(request: Request): Promise<unknown>
 		for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
 		return JSON.parse(new TextDecoder().decode(bytes));
 	} catch (error) {
-		if (error instanceof SourceOrganizationInputError) throw error;
-		throw new SourceOrganizationInputError("Could not read source organization action.");
+		if (error instanceof BoundedJsonTooLargeError) throw options.makeError(error.message);
+		throw options.makeError(options.invalid);
 	} finally {
 		void reader.cancel().catch(() => undefined);
 		reader.releaseLock();
 	}
+}
+
+export function readOrganizationAction(request: Request): Promise<unknown> {
+	return readBoundedJsonBody(request, {
+		makeError: (message) => new SourceOrganizationInputError(message),
+		tooLarge: "Source organization request is too large.",
+		missing: "Missing source organization action.",
+		invalid: "Could not read source organization action.",
+	});
 }

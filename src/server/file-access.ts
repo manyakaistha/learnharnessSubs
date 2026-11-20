@@ -11,7 +11,7 @@ import { readFileAccessSettings } from "../store/settings.ts";
 
 export function expandFolder(folder: string, home: string = os.homedir()): string {
 	if (folder === "~") return home;
-	if (folder.startsWith("~/")) return path.join(home, folder.slice(2));
+	if (folder.startsWith("~/") || folder.startsWith(`~${path.sep}`)) return path.join(home, folder.slice(2));
 	if (!path.isAbsolute(folder)) throw new Error("Invalid file-access folder for this server filesystem");
 	return path.resolve(folder);
 }

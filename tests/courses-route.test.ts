@@ -863,3 +863,68 @@ it("folder overlap compares canonical paths in both directions including aliases
 		fs.rmSync(dataAncestorAlias, { recursive: true, force: true });
 	}
 });
+
+it("preserves exact validation messages for bounded JSON requests and ~ expansion via shared helpers", async () => {
+	const missingBodyRes = await coursesRoute.POST(new Request("http://localhost/api/courses", { method: "POST" }));
+	assert.equal(missingBodyRes.status, 400);
+	assert.equal((await missingBodyRes.json()).error, "Missing course action.");
+
+	const malformedRes = await coursesRoute.POST(new Request("http://localhost/api/courses", { method: "POST", body: "{" }));
+	assert.equal(malformedRes.status, 400);
+	assert.equal((await malformedRes.json()).error, "Could not read course action.");
+
+	const tooLargeRes = await coursesRoute.POST(new Request("http://localhost/api/courses", { method: "POST", body: "x".repeat(65537) }));
+	assert.equal(tooLargeRes.status, 400);
+	assert.equal((await tooLargeRes.json()).error, "Course request is too large.");
+
+	const orgMissingRes = await sourcesRoute.POST(new Request("http://localhost/api/graph/sources", { method: "POST" }));
+	assert.equal(orgMissingRes.status, 400);
+	assert.equal((await orgMissingRes.json()).error, "Missing source organization action.");
+
+	const created = await (await postCourse({ action: "create", name: "HomeExpand" })).json();
+	const courseId = created.courses[0].id as string;
+
+	const relFolderRes = await postCourse({ action: "add-folder", id: courseId, path: "rel/dir" });
+	assert.equal(relFolderRes.status, 400);
+	assert.equal((await relFolderRes.json()).error, "Folder path must be an absolute path.");
+
+	const chat = stores.chatStore.createChat("Tilde session");
+	await postCourse({ action: "assign", sourceId: chat.id, courseId });
+	const relFileRes = await postCourse({ action: "attach-session-files", chatId: chat.id, paths: ["rel/file.md"] });
+	assert.equal(relFileRes.status, 400);
+	assert.equal((await relFileRes.json()).error, "File path must be an absolute path.");
+
+	// include-file expands ~/ via shared expandFolder
+	setCourseExtractorForTests(async () => ({ nodes: 1, chains: 0 }));
+	const fakeHome = path.join(root, "include-home");
+	const noteDir = path.join(fakeHome, "course");
+	const noteFile = path.join(noteDir, "note.md");
+	fs.mkdirSync(noteDir, { recursive: true });
+	fs.writeFileSync(noteFile, "# Note");
+	await postCourse({ action: "add-folder", id: courseId, path: noteDir });
+	await waitForCourseScanForTests(courseId);
+	const st = stores.courseStore.read();
+	st.folderFiles[noteFile] = {
+		courseId,
+		folderId: st.courses[0]!.folders[0]!.id,
+		sourceId: courseFileSourceId(noteFile),
+		sha256: "x",
+		extractedAt: "2026-11-20T00:00:00Z",
+		excluded: true,
+	};
+	stores.courseStore.write(st);
+
+	const prevHome = process.env.HOME;
+	const prevProfile = process.env.USERPROFILE;
+	process.env.HOME = fakeHome;
+	process.env.USERPROFILE = fakeHome;
+	try {
+		const incRes = await postCourse({ action: "include-file", id: courseId, path: "~/course/note.md" });
+		assert.equal(incRes.status, 200);
+		await waitForCourseScanForTests(courseId);
+		assert.equal(stores.courseStore.read().folderFiles[noteFile]?.excluded, undefined);
+	} finally {
+		if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+		if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+	}
+});

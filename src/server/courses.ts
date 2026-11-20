@@ -20,22 +20,22 @@ import { isProtectedSourcePath, isSensitivePath } from "../agent/tools/fs-shared
 import { applyCourseAction, courseClosure, courseOf, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
 import { emit } from "../core/events.ts";
 import { courseFileStatuses, courseScanning, forgetCourseStatuses, startCourseScan } from "./course-sources.ts";
+import { expandFolder } from "./file-access.ts";
 import { deleteSources, SourceDeletionError } from "./source-deletion.ts";
-import { sourceDirectory } from "./source-organization.ts";
+import { readBoundedJsonBody, sourceDirectory } from "./source-organization.ts";
 import { stores } from "./stores.ts";
 
 export class CourseInputError extends Error {}
 export class CoursePayloadTooLargeError extends Error {}
 export class UnknownCourseError extends Error {}
 
-function expandHomePath(rawPath: string, home: string = os.homedir()): string {
-	if (rawPath === "~") return home;
-	if (rawPath.startsWith("~/") || rawPath.startsWith(`~${path.sep}`)) return path.join(home, rawPath.slice(2));
-	return rawPath;
-}
-
 function canonicalFolderPath(rawPath: string): string {
-	const lexical = path.resolve(expandHomePath(rawPath));
+	let lexical: string;
+	try {
+		lexical = expandFolder(rawPath);
+	} catch {
+		lexical = path.resolve(rawPath);
+	}
 	try {
 		return realSourcePath(lexical);
 	} catch {
@@ -60,9 +60,12 @@ function assertNoFolderOverlap(state: CourseState, targetId: string, candidatePa
 }
 
 function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): string {
-	const expanded = expandHomePath(rawPath, home);
-	if (!path.isAbsolute(expanded)) throw new CourseInputError("Folder path must be an absolute path.");
-	const normalized = path.resolve(expanded);
+	let normalized: string;
+	try {
+		normalized = expandFolder(rawPath, home);
+	} catch {
+		throw new CourseInputError("Folder path must be an absolute path.");
+	}
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(normalized);
@@ -74,11 +77,18 @@ function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): 
 }
 
 function resolveSessionFilePath(rawPath: string, home: string = os.homedir()): string {
-	const expanded = expandHomePath(rawPath, home);
-	if (expanded.includes("\0") || !path.isAbsolute(expanded)) {
+	if (rawPath.includes("\0")) {
 		throw new CourseInputError("File path must be an absolute path.");
 	}
-	const normalized = path.resolve(expanded);
+	let normalized: string;
+	try {
+		normalized = expandFolder(rawPath, home);
+	} catch {
+		throw new CourseInputError("File path must be an absolute path.");
+	}
+	if (normalized.includes("\0")) {
+		throw new CourseInputError("File path must be an absolute path.");
+	}
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(/* turbopackIgnore: true */ normalized);
@@ -179,10 +189,11 @@ export function mutateCourses(raw: unknown): CoursesView {
 		action = { ...action, paths: [...new Set(action.paths.map((p) => resolveSessionFilePath(p)))] };
 	}
 
-	if (action.action === "include-file") {
-		const expanded = expandHomePath(action.path);
-		if (!Object.hasOwn(state.folderFiles, action.path) && path.isAbsolute(expanded)) {
-			action = { ...action, path: path.resolve(expanded) };
+	if (action.action === "include-file" && !Object.hasOwn(state.folderFiles, action.path)) {
+		try {
+			action = { ...action, path: expandFolder(action.path) };
+		} catch {
+			// Relative or invalid paths stay unchanged so applyCourseAction reports not excluded.
 		}
 	}
 
@@ -511,34 +522,12 @@ export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 	if (changed) stores.courseStore.write(next);
 }
 
-/** Bound actual JSON bytes as well as declared size; mirror readOrganizationAction. */
-export async function readCourseRequest(request: Request): Promise<unknown> {
-	const limit = 64 * 1024;
-	if (Number(request.headers.get("content-length")) > limit) {
-		void request.body?.cancel().catch(() => undefined);
-		throw new CourseInputError("Course request is too large.");
-	}
-	const reader = request.body?.getReader();
-	if (!reader) throw new CourseInputError("Missing course action.");
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	try {
-		for (;;) {
-			const { value, done } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (total > limit) throw new CourseInputError("Course request is too large.");
-			chunks.push(value);
-		}
-		const bytes = new Uint8Array(total);
-		let offset = 0;
-		for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-		return JSON.parse(new TextDecoder().decode(bytes));
-	} catch (error) {
-		if (error instanceof CourseInputError) throw error;
-		throw new CourseInputError("Could not read course action.");
-	} finally {
-		void reader.cancel().catch(() => undefined);
-		reader.releaseLock();
-	}
+/** Bound actual JSON bytes as well as declared size; share readBoundedJsonBody. */
+export function readCourseRequest(request: Request): Promise<unknown> {
+	return readBoundedJsonBody(request, {
+		makeError: (message) => new CourseInputError(message),
+		tooLarge: "Course request is too large.",
+		missing: "Missing course action.",
+		invalid: "Could not read course action.",
+	});
 }
