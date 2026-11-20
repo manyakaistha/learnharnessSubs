@@ -71,6 +71,7 @@ import type { GraphChain, GraphNode, SourceDirectory, SourceEntry, SourceFolder,
 import { EditableSourceName, SourceDragRow, sourceNameMatches, SourceFolderTree, type OrganizationChange } from "./source-folder-tree";
 import { chainRow, useChainNavigation } from "./chain-navigation";
 import { useServerEvent, useServerResync } from "./server-events";
+import { courseQueryParam, useCourses } from "./courses";
 import { TopBar } from "@/components/top-bar";
 import { InteractionLayerOwner, useInteractionLayer } from "./interaction-layers";
 import { DeleteSourceDialog } from "@/components/delete-source-dialog";
@@ -721,6 +722,8 @@ export function ChainTableOverlay({
 			return sources.size === previous.sources.size && folders.size === previous.folders.size ? previous : { sources, folders };
 		});
 	}, [visibleDirectory]);
+	const { filter, revision: coursesRevision } = useCourses();
+	const courseQuery = courseQueryParam(filter);
 	const requestVersion = useRef(0);
 	const directoryOpening = useRef(0);
 	const directoryRequest = useRef<AbortController | null>(null);
@@ -731,12 +734,12 @@ export function ChainTableOverlay({
 		const request = new AbortController();
 		directoryRequest.current = request;
 		try {
-			const response = await fetch("/api/graph/sources", { cache: "no-store", signal: request.signal });
+			const response = await fetch(`/api/graph/sources${courseQuery}`, { cache: "no-store", signal: request.signal });
 			if (!response.ok) throw new Error("Could not read source organization.");
 			const body = await response.json() as SourceDirectory;
 			if (!request.signal.aborted && version === requestVersion.current) { setDirectory(body); setDirectoryPending(false); setDirectoryFailure(""); }
 		} catch (error) { if (!request.signal.aborted && version === requestVersion.current) setDirectoryFailure(error instanceof Error ? error.message : String(error)); }
-	}, []);
+	}, [courseQuery]);
 	useEffect(() => {
 		if (open) void readDirectory();
 		return () => {
@@ -747,9 +750,10 @@ export function ChainTableOverlay({
 			// Keep cached organization, but require fresh source kinds on EACH opening.
 			setDirectoryPending(true);
 		};
-	}, [open, readDirectory]);
+	}, [open, readDirectory, coursesRevision]);
 	useServerEvent("sources-changed", () => { if (open) void readDirectory(); });
 	useServerEvent("chats-changed", () => { if (open) void readDirectory(); });
+	useServerEvent("courses-changed", () => { if (open) void readDirectory(); });
 	useServerResync(() => { if (open) void readDirectory(); });
 	const changeOrganization: OrganizationChange = (action) => {
 		const opening = directoryOpening.current;
