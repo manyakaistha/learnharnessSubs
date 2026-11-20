@@ -505,7 +505,7 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 		return { nodes: 1, chains: 0 };
 	});
 
-	const uploadFiles = (fields: { courseId?: string; chatId?: string; files: Array<{ name: string; body: Uint8Array | string }> }) => {
+	const uploadFiles = (fields: { courseId?: string; chatId?: string; files: Array<{ name: string; body: Uint8Array<ArrayBuffer> | string }> }) => {
 		const form = new FormData();
 		if (fields.courseId !== undefined) form.append("courseId", fields.courseId);
 		if (fields.chatId !== undefined) form.append("chatId", fields.chatId);
