@@ -335,8 +335,9 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 	}
 }
 
-/** Drop membership for deleted sources and mark deleted folder-file entries
- * `excluded: true` (keeping sha256) so scans skip them until re-included. */
+/** Drop membership and sessionFiles for deleted sources, and mark deleted
+ * folder-file entries `excluded: true` (keeping sha256) so scans skip them
+ * until re-included via `include-file`. */
 export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 	if (sourceIds.size === 0) return;
 	const state = stores.courseStore.read();
@@ -345,6 +346,10 @@ export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 	for (const id of sourceIds) {
 		if (Object.hasOwn(next.membership, id)) {
 			delete next.membership[id];
+			changed = true;
+		}
+		if (Object.hasOwn(next.sessionFiles, id)) {
+			delete next.sessionFiles[id];
 			changed = true;
 		}
 	}

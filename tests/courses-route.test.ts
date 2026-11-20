@@ -352,6 +352,11 @@ it("source deletion removes membership and marks folderFiles entries excluded in
 	for (const id of [chatKeep.id, chatDrop.id, chatRouteDel.id, "src_file1"]) {
 		await postCourse({ action: "assign", sourceId: id, courseId: cId });
 	}
+	const attachedSessionFile = path.join(root, "session-attached.md");
+	fs.writeFileSync(attachedSessionFile, "# Attached");
+	for (const id of [chatKeep.id, chatDrop.id, chatRouteDel.id]) {
+		await postCourse({ action: "attach-session-files", chatId: id, paths: [attachedSessionFile] });
+	}
 	const stateWithFolderFile = stores.courseStore.read();
 	stateWithFolderFile.folderFiles["/tmp/file1.md"] = {
 		courseId: cId,
@@ -392,6 +397,9 @@ it("source deletion removes membership and marks folderFiles entries excluded in
 	assert.equal(afterState.membership[chatDrop.id], undefined);
 	assert.equal(afterState.membership[chatRouteDel.id], undefined);
 	assert.equal(afterState.membership[chatKeep.id], cId);
+	assert.equal(afterState.sessionFiles[chatDrop.id], undefined);
+	assert.equal(afterState.sessionFiles[chatRouteDel.id], undefined);
+	assert.deepEqual(afterState.sessionFiles[chatKeep.id], [path.resolve(attachedSessionFile)]);
 	assert.deepEqual(afterState.folderFiles["/tmp/file1.md"], {
 		courseId: cId,
 		folderId: "cfld_1",
