@@ -358,6 +358,11 @@ function FileStatusRow({
 					{file.error}
 				</p>
 			)}
+			{file.state !== "failed" && file.state !== "excluded" && file.notice && (
+				<p data-testid="course-file-notice" className="text-[11px] text-muted-foreground">
+					{file.notice}
+				</p>
+			)}
 		</div>
 	);
 }

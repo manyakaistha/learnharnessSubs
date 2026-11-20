@@ -5,18 +5,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES } from "../../lib/notes-import-limits.ts";
 import { NotesImportError } from "../agent/subagents/extraction.ts";
-import { joinPages } from "../agent/subagents/pdf-markdown.ts";
-import { convertPdf } from "../agent/subagents/pdf-ops.ts";
 import type { CourseFileStatus, CourseFolder, CourseState } from "../core/contracts/courses.ts";
 import { emit } from "../core/events.ts";
 import { placeImportedSource } from "../core/source-organization.ts";
 import { isWithin } from "../agent/tools/file-access.ts";
 import { protectedSourceChecker } from "../agent/tools/fs-shared.ts";
 import { extraction } from "./chat-handler.ts";
+import { decodeNotesBytes } from "./notes-decode.ts";
 import { stores } from "./stores.ts";
 
-const MAX_PDF_PAGES = 1000;
-const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // "%PDF-"
 const BUSY_RETRY_DELAY_MS = 50;
 const BUSY_MAX_WAIT_MS = 120_000;
 
@@ -65,25 +62,6 @@ function courseFileDisplayPath(folderPath: string, absolutePath: string): string
 
 function oversizeMessage(): string {
 	return `File is too large (max ${Math.round(MAX_IMPORT_BYTES / (1024 * 1024))} MB).`;
-}
-
-async function decodeNotesBytes(bytes: Uint8Array): Promise<{ kind: "notes"; text: string } | { kind: "refused"; error: string }> {
-	if (!PDF_MAGIC.every((byte, i) => bytes[i] === byte)) {
-		if (bytes.subarray(0, 8192).includes(0)) return { kind: "refused", error: "This file isn't plain text." };
-		return { kind: "notes", text: new TextDecoder().decode(bytes) };
-	}
-	const pdf = await convertPdf(bytes, MAX_PDF_PAGES);
-	switch (pdf.kind) {
-		case "unreadable":
-			return { kind: "refused", error: "Could not open this PDF." };
-		case "too-long":
-			return { kind: "refused", error: "Too long. Max 1,000 pages." };
-		case "converted": {
-			const text = joinPages(pdf.pages);
-			if (!text) return { kind: "refused", error: "OCR not supported yet." };
-			return { kind: "notes", text };
-		}
-	}
 }
 
 interface DiscoveredFile {
@@ -365,7 +343,12 @@ async function runCourseScan(courseId: string, initialFolders: CourseFolder[] = 
 					continue;
 				}
 
-				setFileStatus(courseId, { path: item.absPath, folderId: item.folder.id, state: "extracted" });
+				setFileStatus(courseId, {
+					path: item.absPath,
+					folderId: item.folder.id,
+					state: "extracted",
+					...(decoded.notice ? { notice: decoded.notice } : {}),
+				});
 				const assignMembership = !hadFolderFileBefore && !Object.hasOwn(latest.membership, sourceId);
 				const nextState: CourseState = {
 					...latest,

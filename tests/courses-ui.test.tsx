@@ -708,6 +708,34 @@ describe("CoursePanelDialog & DeleteCourseDialog", () => {
 		await clickTestId("course-rescan");
 		assert.deepEqual(posts, [{ action: "rescan", id: "crs_cv" }]);
 	});
+
+	it("CoursePanelDialog renders file decode notices muted under extracted rows", async () => {
+		const view: CoursesView = {
+			courses: [
+				makeCourse("crs_cv", "CV", {
+					folders: [{ id: "cfld_1", path: "/notes/cv", addedAt: "2026-11-20T00:00:00.000Z" }],
+					files: [
+						{
+							path: "/notes/cv/slides.pdf",
+							folderId: "cfld_1",
+							state: "extracted",
+							notice: "Scanned pages may have errors. Skipped 1 image-only page; OCR is not supported.",
+						},
+					],
+				}),
+			],
+			membership: {},
+		};
+		globalThis.fetch = async (url) => {
+			if (url === "/api/courses") return Response.json(view);
+			return Response.json({});
+		};
+		await mountWithProviders(<CoursePanelDialog courseId="crs_cv" open onClose={() => {}} />);
+		const notice = document.querySelector('[data-testid="course-file-notice"]');
+		assert.ok(notice);
+		assert.match(notice.className, /text-muted-foreground/);
+		assert.equal(notice.textContent, "Scanned pages may have errors. Skipped 1 image-only page; OCR is not supported.");
+	});
 });
 
 describe("New sessions carry active courseId", () => {

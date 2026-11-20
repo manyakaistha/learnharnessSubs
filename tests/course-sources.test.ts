@@ -12,6 +12,7 @@ fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 const { MAX_IMPORT_BYTES } = await import("../lib/notes-import-limits.ts");
+const { tinyPdf } = await import("./helpers/tiny-pdf.ts");
 const { applyCourseAction, emptyCourseState } = await import("../src/core/courses.ts");
 const { subscribe } = await import("../src/core/events.ts");
 const { ModelsNotConfiguredError } = await import("../src/core/settings.ts");
@@ -584,4 +585,47 @@ it("catches scan-level store failures, marks pending files failed, emits courses
 		t.mock.restoreAll();
 		process.off("unhandledRejection", onRejection);
 	}
+});
+
+it("carries PDF scanner and skipped image-only page notices into course file statuses via shared decoder", async () => {
+	const folder = path.join(root, "pdf-notices");
+	fs.mkdirSync(folder, { recursive: true });
+	const mixedPdf = path.join(folder, "lecture.pdf");
+	const scanPdf = path.join(folder, "scan.pdf");
+	const plainMd = writeText(path.join(folder, "plain.md"), "# Plain text");
+	fs.writeFileSync(
+		mixedPdf,
+		tinyPdf([{ image: true }, { runs: [{ text: "Lecture 1", x: 72, y: 700, size: 20 }] }]),
+	);
+	fs.writeFileSync(scanPdf, tinyPdf([{ image: true }]));
+
+	const { courseId, folderId } = createCourseWithFolder("PdfNotices", folder);
+	const received: Array<{ filePath: string; text: string }> = [];
+	setCourseExtractorForTests(async ({ filePath, text }) => {
+		received.push({ filePath, text });
+		return { nodes: 1, chains: 0 };
+	});
+
+	startCourseScan(courseId);
+	while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+
+	assert.deepEqual(received.map((r) => r.filePath).sort(), ["pdf-notices/lecture.pdf", "pdf-notices/plain.md"]);
+	const statuses = courseFileStatuses(courseId);
+	assert.deepEqual(statuses.find((s) => s.path === mixedPdf), {
+		path: mixedPdf,
+		folderId,
+		state: "extracted",
+		notice: "Scanned pages may have errors. Skipped 1 image-only page; OCR is not supported.",
+	});
+	assert.deepEqual(statuses.find((s) => s.path === plainMd), {
+		path: plainMd,
+		folderId,
+		state: "extracted",
+	});
+	assert.deepEqual(statuses.find((s) => s.path === scanPdf), {
+		path: scanPdf,
+		folderId,
+		state: "failed",
+		error: "OCR not supported yet.",
+	});
 });

@@ -101,6 +101,7 @@ export interface CourseFileStatus {
 	folderId: string;
 	state: CourseFileState;
 	error?: string;
+	notice?: string;
 }
 
 export interface CourseView extends Course {
