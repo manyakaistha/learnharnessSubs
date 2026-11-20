@@ -25,3 +25,13 @@ Owner-approved design (2026-11-20). Shared spec for every courses work package.
 - The file tools (`read`, `ls`, `grep`, `find`, `pdf-read`) may access ONLY the folders of the course and its included courses (`CourseScope.folders`). The global File Access setting is ignored in course sessions. Sessions with no course behave exactly as today.
 - A system-prompt segment lists the folders, grouped as the own course and then each included course by name, and instructs the agent as follows: resolve ambiguous references (such as "week 1") to the **own course first**; use an included course's material only when the learner names that course, or when the own course has no match.
 - Graph tools and the Practice picker see only the course scope, with the course's own nodes ranked first.
+
+## Behaviour settled during implementation and review
+- **Sidebar:** a course lists only its OWN sessions. Graphs, the Practice picker and the agent see own plus included courses.
+- **Moving sources:** sessions move between courses from the session row menu ("Move to course"). Imported files move with the Course picker on their row in the Chains source tree.
+- **Overlapping folders:** a folder may belong to only one course. Attaching a folder that equals, contains, or is inside any course's attached folder is rejected, because file identity is global per path.
+- **Scan containment:** scans never follow symlinks outside the attached folder or into credential locations. Two links to the same file extract once.
+- **Rescans:** a rescan requested while a scan runs queues exactly one follow-up pass. Reopening the app with a course already active rescans it once.
+- **Deleting while extracting:** "Also delete this course's sessions and files" is refused (409) while the course's folders are still extracting.
+- **Course graph provenance:** a course graph (and "No course") carries only in-scope provenance, so clusters and session lists never name an out-of-scope session.
+- **Layout positions:** they merge on save, so dragging nodes in a course view keeps every other node's position.
