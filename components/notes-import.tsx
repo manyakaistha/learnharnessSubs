@@ -4,9 +4,10 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type ChangeEv
 import { WaypointsIcon } from "lucide-react";
 import { Hint } from "@/components/ui/hint";
 import { IMPORT_ACCEPT } from "@/lib/notes-import-limits.ts";
+import { postCourseFiles, useCourses } from "@/components/courses";
 import { useInteractionLayer, useInteractionLayers } from "@/components/interaction-layers";
 import { INTERACTION_LAYER_Z_BASE } from "@/components/host-dialog";
-import { createNotesImportQueue, EMPTY_IMPORT_QUEUE, notesPath } from "./notes-import-queue";
+import { createNotesImportQueue, EMPTY_IMPORT_QUEUE, notesPath, type NotesImportTarget } from "./notes-import-queue";
 
 export { MAX_IMPORT_BYTES } from "@/lib/notes-import-limits.ts";
 export { notesPath } from "./notes-import-queue";
@@ -64,10 +65,26 @@ export async function postNotesImport(files: readonly File[]): Promise<NotesImpo
 	return parseNotesImportResults(body, files);
 }
 
+async function postCourseImport(files: readonly File[], target: NotesImportTarget): Promise<NotesImportResult[]> {
+	if (target.upload) await target.upload(files);
+	else await postCourseFiles(target.courseId, files);
+	return files.map((file, requestIndex) => ({
+		requestIndex,
+		filePath: notesPath(file),
+		ok: true,
+		outcome: "completed",
+		stats: { nodes: 0 },
+		notice: `Added to ${target.courseName}, extracting in the background.`,
+	}));
+}
+
 // Client module singleton: shared by both home views and successive selections.
 // SSR never appends Files, and uses the immutable empty server snapshot.
-const pageImportQueue = createNotesImportQueue(postNotesImport);
+const pageImportQueue = createNotesImportQueue((files, target) =>
+	target ? postCourseImport(files, target) : postNotesImport(files),
+);
 export function useNotesImport(callbacks: { onStart?: () => void; onFinish?: () => void } = {}) {
+	const { courses, uploadFiles } = useCourses();
 	const snapshot = useSyncExternalStore(pageImportQueue.subscribe, pageImportQueue.getSnapshot, () => EMPTY_IMPORT_QUEUE);
 	const latest = useRef(callbacks);
 	latest.current = callbacks;
@@ -80,23 +97,41 @@ export function useNotesImport(callbacks: { onStart?: () => void; onFinish?: () 
 	}, [snapshot.completion]);
 	return {
 		errors: snapshot.errors, notices: snapshot.notices, importing: snapshot.importing,
-		onImportFiles: (files: FileList | null) => {
+		onImportFiles: (files: FileList | null, courseId?: string | null) => {
 			if (!files || files.length === 0) return;
 			latest.current.onStart?.();
-			pageImportQueue.append(Array.from(files));
+			const target: NotesImportTarget | undefined = courseId
+				? {
+					courseId,
+					courseName: courses.find((c) => c.id === courseId)?.name ?? courseId,
+					upload: (fs) => uploadFiles(courseId, fs),
+				}
+				: undefined;
+			pageImportQueue.append(Array.from(files), target);
 		},
 	};
 }
 
 /** PR198's shared Files / Folder native picker. Unlike the donor, it remains
  * available while work is running; later selections join the SAME queue. */
-export function NotesImportControl({ importing, onImportFiles }: { importing: boolean; onImportFiles: (files: FileList | null) => void }) {
+export function NotesImportControl({ importing, onImportFiles }: { importing: boolean; onImportFiles: (files: FileList | null, courseId?: string | null) => void }) {
+	const { courses, activeCourseId } = useCourses();
+	const [selectedCourseId, setSelectedCourseId] = useState<string>(() => activeCourseId ?? "");
+	useEffect(() => {
+		setSelectedCourseId(activeCourseId ?? "");
+	}, [activeCourseId]);
+	useEffect(() => {
+		if (selectedCourseId && courses.length > 0 && !courses.some((c) => c.id === selectedCourseId)) {
+			setSelectedCourseId(activeCourseId ?? "");
+		}
+	}, [courses, selectedCourseId, activeCourseId]);
 	const filesRef = useRef<HTMLInputElement>(null);
 	const folderRef = useRef<HTMLInputElement>(null);
 	const [open, setOpen] = useState(false);
 	const hintId = useId();
+	const courseSelectId = useId();
 	const onChange = (event: ChangeEvent<HTMLInputElement>) => {
-		onImportFiles(event.target.files);
+		onImportFiles(event.target.files, selectedCourseId || null);
 		event.target.value = "";
 	};
 	const rootRef = useRef<HTMLDivElement>(null);
@@ -119,6 +154,24 @@ export function NotesImportControl({ importing, onImportFiles }: { importing: bo
 			{open && (
 				<div ref={panelRef} role="menu" aria-label="Extract files into the graph" aria-describedby={hintId} style={{ zIndex: INTERACTION_LAYER_Z_BASE + popupLayer.order }} className="absolute right-0 top-full mt-1 w-52 rounded-lg border bg-card p-1 shadow-lg">
 					<div role="none"><p id={hintId} className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">For lessons, attach material to a session instead.</p></div>
+					<div role="none" className="mb-1 border-b border-border/60 px-2 pb-1.5">
+						<label htmlFor={courseSelectId} className="mb-1 block text-[11px] text-muted-foreground">
+							Course
+						</label>
+						<select
+							id={courseSelectId}
+							aria-label="Course"
+							data-testid="extract-course-select"
+							value={selectedCourseId}
+							onChange={(e) => setSelectedCourseId(e.target.value)}
+							className="h-6 w-full truncate rounded-sm border border-border bg-background px-1.5 text-xs text-foreground outline-none"
+						>
+							<option value="">No course</option>
+							{courses.map((c) => (
+								<option key={c.id} value={c.id}>{c.name}</option>
+							))}
+						</select>
+					</div>
 					{choices.map(([label, input]) => <button key={label} type="button" role="menuitem" className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-accent"
 						onClick={() => { setOpen(false); input.current?.click(); }}>{label}</button>)}
 				</div>
