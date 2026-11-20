@@ -66,11 +66,9 @@ import type {
 	GraphSnapshotNode,
 } from "./contracts.ts";
 import type { CourseFilter, CourseScope, CourseState } from "./contracts/courses.ts";
-import { projectCourseGraph, projectUnassignedGraph, resolveCourseScope } from "./courses.ts";
+import { projectCourseGraph, projectUnassignedGraph, resolveCourseScope, type CourseGraphNode } from "./courses.ts";
 import { MIN_CLUSTER_SIZE } from "./clusters.ts";
 import { formatChainLine } from "./chains.ts";
-import { projectCourseGraph, type CourseGraphNode } from "./courses.ts";
-import type { CourseScope } from "./contracts/courses.ts";
 import { attachImpToCommunities, birthSessionOf, birthSessionPartition } from "./session-clusters.ts";
 import { sourceFileLabel } from "./source-label.ts";
 import type { ChatStore, GraphStore } from "./ports.ts";
