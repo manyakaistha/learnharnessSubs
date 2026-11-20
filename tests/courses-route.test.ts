@@ -657,3 +657,67 @@ it("deleting a course-folder source excludes it across rescans until include-fil
 	assert.equal(finalView.membership[srcA], courseId);
 	assert.equal(stores.courseStore.read().folderFiles[fileA]?.excluded, undefined);
 });
+
+it("course delete removes managed folder on delete-sources (with containment) and keeps it on ungroup", async () => {
+	setCourseExtractorForTests(async ({ sourceId, filePath }) => {
+		stores.graphStore.upsertSource({ id: sourceId, filePath, importedAt: "2026-11-20T00:00:00Z" });
+		return { nodes: 1, chains: 0 };
+	});
+
+	const uploadOne = (courseId: string, name: string, body: string) => {
+		const form = new FormData();
+		form.append("courseId", courseId);
+		form.append("files", new File([body], name));
+		return courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	};
+
+	// Course 1: ungroup keeps managed copies and chat sessionFiles on disk
+	const c1 = (await (await postCourse({ action: "create", name: "KeepCopies" })).json()).courses[0].id as string;
+	const chat1 = stores.chatStore.createChat("Kept session");
+	await postCourse({ action: "assign", sourceId: chat1.id, courseId: c1 });
+	const up1 = await (await uploadOne(c1, "kept.md", "# kept")).json();
+	const copied1 = up1.copied[0] as string;
+	await postCourse({ action: "attach-session-files", chatId: chat1.id, paths: [copied1] });
+	await waitForCourseScanForTests(c1);
+
+	const delUngroup = await postCourse({ action: "delete", id: c1, mode: "ungroup" });
+	assert.equal(delUngroup.status, 200);
+	assert.equal(fs.existsSync(copied1), true);
+	assert.equal(stores.graphStore.readSources().some((s) => s.id === courseFileSourceId(copied1)), true);
+	assert.deepEqual(stores.courseStore.read().sessionFiles[chat1.id], [copied1]);
+
+	// Course 2: delete-sources removes managed folder inside COURSE_FILES_DIR, never user folders or outside paths
+	const c2 = (await (await postCourse({ action: "create", name: "RemoveCopies" })).json()).courses[0].id as string;
+	const extDir = path.join(root, "user-external");
+	fs.mkdirSync(extDir, { recursive: true });
+	const extFile = path.join(extDir, "orig.md");
+	fs.writeFileSync(extFile, "# external");
+	await postCourse({ action: "add-folder", id: c2, path: extDir });
+	await waitForCourseScanForTests(c2);
+
+	const up2 = await (await uploadOne(c2, "managed.md", "# managed")).json();
+	const copied2 = up2.copied[0] as string;
+	const managedDir2 = path.join(COURSE_FILES_DIR, c2);
+	await waitForCourseScanForTests(c2);
+
+	// Inject a rogue managed: true folder outside COURSE_FILES_DIR to test containment guard
+	const outsideProtected = path.join(root, "outside-managed-guard");
+	fs.mkdirSync(outsideProtected, { recursive: true });
+	const outsideFile = path.join(outsideProtected, "keep.md");
+	fs.writeFileSync(outsideFile, "do not delete");
+	const tampered = stores.courseStore.read();
+	tampered.courses.find((c) => c.id === c2)!.folders.push({
+		id: "cfld_rogue",
+		path: outsideProtected,
+		addedAt: "2026-11-20T00:00:00Z",
+		managed: true,
+	});
+	stores.courseStore.write(tampered);
+
+	const delPurge = await postCourse({ action: "delete", id: c2, mode: "delete-sources" });
+	assert.equal(delPurge.status, 200);
+	assert.equal(fs.existsSync(managedDir2), false);
+	assert.equal(fs.existsSync(extFile), true, "user-attached external folder must never be deleted");
+	assert.equal(fs.existsSync(outsideFile), true, "containment guard must protect paths outside COURSE_FILES_DIR");
+	assert.equal(stores.graphStore.readSources().some((s) => s.id === courseFileSourceId(copied2)), false);
+});

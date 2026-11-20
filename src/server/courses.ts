@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { COURSE_FILES_DIR } from "../../config.ts";
 import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE } from "../../lib/notes-import-limits.ts";
-import type { CourseAction, CourseFilesResponse, CourseFilter, CourseState, CoursesView } from "../core/contracts/courses.ts";
+import type { CourseAction, CourseFilesResponse, CourseFilter, CourseFolder, CourseState, CoursesView } from "../core/contracts/courses.ts";
 import type { SourceDirectory } from "../core/source-organization.ts";
 import { isWithin } from "../agent/tools/file-access.ts";
 import { isProtectedSourcePath, isSensitivePath } from "../agent/tools/fs-shared.ts";
@@ -161,13 +161,16 @@ export function mutateCourses(raw: unknown): CoursesView {
 		}
 	}
 
+	let deletedManagedFolders: readonly CourseFolder[] = [];
 	if (action.action === "delete") {
 		const targetId = action.id;
-		if (!state.courses.some((c) => c.id === targetId)) throw new CourseInputError("Course no longer exists.");
+		const targetCourse = state.courses.find((c) => c.id === targetId);
+		if (!targetCourse) throw new CourseInputError("Course no longer exists.");
 		if (action.mode === "delete-sources" && courseScanning(targetId)) {
 			throw new SourceDeletionError("This course is still extracting its folders. Wait for it to finish, then delete.", 409, "extraction_running");
 		}
 		if (action.mode === "delete-sources") {
+			deletedManagedFolders = targetCourse.folders.filter((f) => f.managed);
 			const ownSources = ownSourcesOf(state, targetId);
 			if (ownSources.length > 0) {
 				deleteSources({ sourceIds: ownSources, folderIds: [], deleteSessions: true });
@@ -191,9 +194,43 @@ export function mutateCourses(raw: unknown): CoursesView {
 	}
 
 	stores.courseStore.write(next);
-	if (action.action === "delete") forgetCourseStatuses(action.id);
+	if (action.action === "delete") {
+		if (action.mode === "delete-sources") removeManagedCourseFolders(deletedManagedFolders);
+		forgetCourseStatuses(action.id);
+	}
 	if (action.action === "add-folder" || action.action === "include-file") startCourseScan(action.id);
 	return buildCoursesView(next);
+}
+
+function removeManagedCourseFolders(folders: readonly CourseFolder[]): void {
+	if (folders.length === 0) return;
+	const managedRoot = path.resolve(COURSE_FILES_DIR);
+	let realRoot: string;
+	try {
+		realRoot = fs.realpathSync.native(/* turbopackIgnore: true */ managedRoot);
+	} catch {
+		return;
+	}
+	for (const folder of folders) {
+		if (!folder.managed) continue;
+		const lexical = path.resolve(folder.path);
+		if (lexical === managedRoot || !isWithin(lexical, managedRoot)) continue;
+		let lstat: fs.Stats;
+		try {
+			lstat = fs.lstatSync(/* turbopackIgnore: true */ lexical);
+		} catch {
+			continue;
+		}
+		if (lstat.isSymbolicLink()) continue;
+		let realTarget: string;
+		try {
+			realTarget = fs.realpathSync.native(/* turbopackIgnore: true */ lexical);
+		} catch {
+			continue;
+		}
+		if (realTarget === realRoot || !isWithin(realTarget, realRoot)) continue;
+		fs.rmSync(/* turbopackIgnore: true */ realTarget, { recursive: true, force: true });
+	}
 }
 
 const MAX_UPLOAD_FILENAME_BYTES = 240;
