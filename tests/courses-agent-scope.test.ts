@@ -12,7 +12,7 @@ after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 const { courseStore } = await import("../src/store/courses.ts");
 const { fileAccessPolicy } = await import("../src/server/file-access.ts");
-const { applyCourseAction, coursePromptSegment, emptyCourseState, resolveCourseScope } = await import("../src/core/courses.ts");
+const { applyCourseAction, coursePromptSegment, coursePromptSegmentForSource, emptyCourseState, resolveCourseScope } = await import("../src/core/courses.ts");
 const { graphSessionIndex, graphSessionPropositions } = await import("../src/core/graph.ts");
 const { setFileAccessPolicy, resolvePolicy, guardSourcePath } = await import("../src/agent/tools/file-access.ts");
 const { createReadTool } = await import("../src/agent/tools/read.ts");
@@ -123,4 +123,25 @@ it("sessionFiles grants access for that chat only and works with read, ls, find,
 		setFileAccessPolicy(fileAccessPolicy);
 		courseStore.write(s);
 	}
+});
+
+it("prompt segment puts session-attached files at the top for that chat only and omits when absent", () => {
+	const attached = "/tmp/priority-notes.md";
+	const withSession = applyCourseAction(s, { action: "attach-session-files", chatId: "chat_vla", paths: [attached] }, { id: "", at: "t" });
+
+	const vlaWithFiles = coursePromptSegmentForSource(withSession, "chat_vla")!;
+	assert.match(vlaWithFiles, /^## Course: VLA\nAttached for this session — rank these highest:\n- \/tmp\/priority-notes\.md\nPrefer these files over other course material/);
+	assert.ok(vlaWithFiles.indexOf(attached) < vlaWithFiles.indexOf(vlaDir), "session files ranked before course folders");
+	assert.ok(vlaWithFiles.indexOf(attached) < vlaWithFiles.indexOf(cvDir), "session files ranked before included folders");
+
+	const cvWithoutFiles = coursePromptSegmentForSource(withSession, "chat_cv")!;
+	assert.doesNotMatch(cvWithoutFiles, /Attached for this session/);
+
+	const emptyWithFiles = coursePromptSegmentForSource(
+		applyCourseAction(s, { action: "attach-session-files", chatId: "chat_empty", paths: [attached] }, { id: "", at: "t" }),
+		"chat_empty",
+	)!;
+	assert.match(emptyWithFiles, /Attached for this session — rank these highest:\n- \/tmp\/priority-notes\.md/);
+
+	assert.equal(coursePromptSegmentForSource(withSession, "chat_free"), null);
 });
