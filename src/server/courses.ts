@@ -154,6 +154,13 @@ export function mutateCourses(raw: unknown): CoursesView {
 		action = { ...action, paths: [...new Set(action.paths.map((p) => resolveSessionFilePath(p)))] };
 	}
 
+	if (action.action === "include-file") {
+		const expanded = expandHomePath(action.path);
+		if (!Object.hasOwn(state.folderFiles, action.path) && path.isAbsolute(expanded)) {
+			action = { ...action, path: path.resolve(expanded) };
+		}
+	}
+
 	if (action.action === "delete") {
 		const targetId = action.id;
 		if (!state.courses.some((c) => c.id === targetId)) throw new CourseInputError("Course no longer exists.");
@@ -185,7 +192,7 @@ export function mutateCourses(raw: unknown): CoursesView {
 
 	stores.courseStore.write(next);
 	if (action.action === "delete") forgetCourseStatuses(action.id);
-	if (action.action === "add-folder") startCourseScan(action.id);
+	if (action.action === "add-folder" || action.action === "include-file") startCourseScan(action.id);
 	return buildCoursesView(next);
 }
 
@@ -328,8 +335,8 @@ export async function addCourseFiles(input: AddCourseFilesInput): Promise<Course
 	}
 }
 
-/** Drop membership and folderFiles entries pointing at deleted sources so
- * courses.json never references vanished chats or notes files. */
+/** Drop membership for deleted sources and mark deleted folder-file entries
+ * `excluded: true` (keeping sha256) so scans skip them until re-included. */
 export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 	if (sourceIds.size === 0) return;
 	const state = stores.courseStore.read();
@@ -341,9 +348,9 @@ export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 			changed = true;
 		}
 	}
-	for (const [filePath, rec] of Object.entries(next.folderFiles)) {
-		if (sourceIds.has(rec.sourceId)) {
-			delete next.folderFiles[filePath];
+	for (const rec of Object.values(next.folderFiles)) {
+		if (sourceIds.has(rec.sourceId) && !rec.excluded) {
+			rec.excluded = true;
 			changed = true;
 		}
 	}

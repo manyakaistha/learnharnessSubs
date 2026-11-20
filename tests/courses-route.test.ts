@@ -17,7 +17,7 @@ const chatByIdRoute = await import("../app/api/chats/[id]/route.ts");
 const graphRoute = await import("../app/api/graph/route.ts");
 const sourcesRoute = await import("../app/api/graph/sources/route.ts");
 const { stores } = await import("../src/server/stores.ts");
-const { setCourseExtractorForTests, waitForCourseScanForTests } = await import("../src/server/course-sources.ts");
+const { courseFileSourceId, setCourseExtractorForTests, waitForCourseScanForTests } = await import("../src/server/course-sources.ts");
 const { COURSE_FILES_DIR, COURSES_FILE } = await import("../config.ts");
 const { MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES } = await import("../lib/notes-import-limits.ts");
 
@@ -342,7 +342,7 @@ it("GET /api/graph and GET /api/graph/sources support ?course=<id>, ?course=none
 	assert.equal((await sourcesRoute.GET(new Request("http://localhost/api/graph/sources?course=crs_unknown"))).status, 404);
 });
 
-it("source deletion removes membership and folderFiles entries from courses.json", async () => {
+it("source deletion removes membership and marks folderFiles entries excluded in courses.json", async () => {
 	const cId = (await (await postCourse({ action: "create", name: "Physics" })).json()).courses[0].id as string;
 	const chatKeep = stores.chatStore.createChat("Keep chat");
 	const chatDrop = stores.chatStore.createChat("Drop chat");
@@ -392,7 +392,14 @@ it("source deletion removes membership and folderFiles entries from courses.json
 	assert.equal(afterState.membership[chatDrop.id], undefined);
 	assert.equal(afterState.membership[chatRouteDel.id], undefined);
 	assert.equal(afterState.membership[chatKeep.id], cId);
-	assert.deepEqual(afterState.folderFiles, {});
+	assert.deepEqual(afterState.folderFiles["/tmp/file1.md"], {
+		courseId: cId,
+		folderId: "cfld_1",
+		sourceId: "src_file1",
+		sha256: "abc",
+		extractedAt: "2026-11-20T00:00:00Z",
+		excluded: true,
+	});
 });
 
 it("malformed, oversized bodies return 400 and corrupt courses.json returns 500 without overwriting", async () => {
@@ -574,4 +581,71 @@ it("POST /api/courses/files copies with clash suffixes, attaches managed folder 
 	assert.equal(cancelled, true);
 	// No partial files left behind from failed uploads
 	assert.deepEqual(fs.readdirSync(expectedDir).sort(), ["week1 (2).md", "week1 (3).md", "week1.md"]);
+});
+
+it("deleting a course-folder source excludes it across rescans until include-file re-extracts it", async () => {
+	const folderDir = path.join(root, "excl-folder");
+	fs.mkdirSync(folderDir, { recursive: true });
+	const fileA = path.join(folderDir, "a.md");
+	const fileB = path.join(folderDir, "b.md");
+	fs.writeFileSync(fileA, "# A v1");
+	fs.writeFileSync(fileB, "# B v1");
+
+	const calls: string[] = [];
+	setCourseExtractorForTests(async ({ sourceId, filePath }) => {
+		calls.push(filePath);
+		stores.graphStore.upsertSource({ id: sourceId, filePath, importedAt: "2026-11-20T00:00:00Z" });
+		return { nodes: 1, chains: 0 };
+	});
+
+	const created = await (await postCourse({ action: "create", name: "Bio" })).json();
+	const courseId = created.courses[0].id as string;
+	await postCourse({ action: "add-folder", id: courseId, path: folderDir });
+	await waitForCourseScanForTests(courseId);
+	assert.equal(calls.length, 2);
+
+	const srcA = courseFileSourceId(fileA);
+	const prevSha = stores.courseStore.read().folderFiles[fileA]?.sha256;
+	assert.ok(prevSha);
+
+	// Delete srcA via source deletion -> membership removed, folderFiles marked excluded (sha256 kept)
+	const delRes = await sourcesRoute.DELETE(
+		new Request("http://localhost/api/graph/sources", {
+			method: "DELETE",
+			body: JSON.stringify({ sourceIds: [srcA], folderIds: [], deleteSessions: false }),
+		}),
+	);
+	assert.equal(delRes.status, 200);
+
+	const stateAfterDel = stores.courseStore.read();
+	assert.equal(stateAfterDel.membership[srcA], undefined);
+	assert.equal(stateAfterDel.folderFiles[fileA]?.excluded, true);
+	assert.equal(stateAfterDel.folderFiles[fileA]?.sha256, prevSha);
+
+	const viewAfterDel = await (await coursesRoute.GET()).json();
+	const bioFilesAfterDel = viewAfterDel.courses.find((c: { id: string }) => c.id === courseId).files;
+	assert.equal(bioFilesAfterDel.find((f: { path: string }) => f.path === fileA)?.state, "excluded");
+	assert.equal(bioFilesAfterDel.find((f: { path: string }) => f.path === fileB)?.state, "extracted");
+
+	// Modify fileA and rescan -> excluded file is skipped
+	calls.length = 0;
+	fs.writeFileSync(fileA, "# A v2 modified");
+	await postCourse({ action: "rescan", id: courseId });
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(calls, []);
+	const viewAfterScan = await (await coursesRoute.GET()).json();
+	assert.equal(viewAfterScan.courses[0].files.find((f: { path: string }) => f.path === fileA)?.state, "excluded");
+
+	// include-file on non-excluded file -> 400
+	assert.equal((await postCourse({ action: "include-file", id: courseId, path: fileB })).status, 400);
+
+	// include-file on excluded file -> clears exclusion and starts scan -> re-extracts
+	const incRes = await postCourse({ action: "include-file", id: courseId, path: fileA });
+	assert.equal(incRes.status, 200);
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(calls, ["excl-folder/a.md"]);
+	const finalView = await (await coursesRoute.GET()).json();
+	assert.equal(finalView.courses[0].files.find((f: { path: string }) => f.path === fileA)?.state, "extracted");
+	assert.equal(finalView.membership[srcA], courseId);
+	assert.equal(stores.courseStore.read().folderFiles[fileA]?.excluded, undefined);
 });
