@@ -69,6 +69,8 @@ import type { CourseFilter, CourseScope, CourseState } from "./contracts/courses
 import { projectCourseGraph, projectUnassignedGraph, resolveCourseScope } from "./courses.ts";
 import { MIN_CLUSTER_SIZE } from "./clusters.ts";
 import { formatChainLine } from "./chains.ts";
+import { projectCourseGraph, type CourseGraphNode } from "./courses.ts";
+import type { CourseScope } from "./contracts/courses.ts";
 import { attachImpToCommunities, birthSessionOf, birthSessionPartition } from "./session-clusters.ts";
 import { sourceFileLabel } from "./source-label.ts";
 import type { ChatStore, GraphStore } from "./ports.ts";
@@ -671,19 +673,30 @@ export interface GraphSessionEntry {
 	propositions: number;
 }
 
+/** Project the global graph to a course scope and filter provenance points to
+ * in-scope sources so birthSessionOf never points outside the course. */
+export function scopedGraphNodes(graphStore: Pick<GraphStore, "readNodes" | "readChains">, scope: CourseScope): CourseGraphNode[] {
+	return projectCourseGraph(getGraph(graphStore), scope).nodes.map((node) => ({
+		...node,
+		provenance: node.provenance.filter((pt) => scope.sources.has(pt.chatId)),
+	}));
+}
+
 /** The prober's session list: every birth session, most-recently-active
- *  first (undatable records sink, in stable id order). */
-export function graphSessionIndex(deps: GraphDeps): GraphSessionEntry[] {
+ *  first (undatable records sink, in stable id order). When `scope` is
+ *  supplied, limits to in-scope sessions with own sessions ordered first. */
+export function graphSessionIndex(deps: GraphDeps, scope?: CourseScope | null): GraphSessionEntry[] {
 	const counts = new Map<string, number>();
-	const born = getGraph(deps.graphStore);
-	for (const cluster of birthSessionPartition(born.nodes)) {
+	const nodes = scope ? scopedGraphNodes(deps.graphStore, scope) : getGraph(deps.graphStore).nodes;
+	for (const cluster of birthSessionPartition(nodes)) {
 		counts.set(cluster.id, cluster.members.length);
 	}
 	const chats = new Map(deps.chatStore.listChats().map((chat) => [chat.id, chat]));
 	const sources = new Map(deps.graphStore.readSources().map((s) => [s.id, s]));
 	const entries: GraphSessionEntry[] = [];
 	for (const [id, propositions] of counts) {
-		const chat = chats.get(id);		if (chat) {
+		const chat = chats.get(id);
+		if (chat) {
 			entries.push({
 				id,
 				name: chat.title,
@@ -706,6 +719,7 @@ export function graphSessionIndex(deps: GraphDeps): GraphSessionEntry[] {
 	}
 	return entries.sort(
 		(a, b) =>
+			(scope ? Number(!scope.ownSources.has(a.id)) - Number(!scope.ownSources.has(b.id)) : 0) ||
 			(b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") ||
 			(b.createdAt ?? "").localeCompare(a.createdAt ?? "") ||
 			(a.id < b.id ? -1 : 1),
@@ -722,8 +736,15 @@ export interface GraphSessionProposition {
 }
 
 /** The propositions BORN in one session — what that session first
- *  articulated. Members sorted by node id — deterministic. */
-export function graphSessionPropositions(deps: GraphDeps, sessionId: string): GraphSessionProposition[] {
+ *  articulated. Members sorted by node id (own non-inherited first when
+ *  course-scoped) — deterministic. */
+export function graphSessionPropositions(deps: GraphDeps, sessionId: string, scope?: CourseScope | null): GraphSessionProposition[] {
+	if (scope) {
+		const born = scopedGraphNodes(deps.graphStore, scope).filter((node) => birthSessionOf(node) === sessionId);
+		return born
+			.sort((a, b) => Number(a.inherited) - Number(b.inherited) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+			.map((node) => ({ nodeId: node.id, name: node.name }));
+	}
 	const born = getGraph(deps.graphStore).nodes.filter((node) => birthSessionOf(node) === sessionId);
 	return born
 		.map((node) => ({ nodeId: node.id, name: node.name }))

@@ -51,6 +51,72 @@ export function resolveCourseScope(state: CourseState, courseId: string): Course
 	return { courseId, courseIds, ownSources, sources: new Set(sourceCourse.keys()), sourceCourse, folders };
 }
 
+export interface CourseGraphContext {
+	scope: CourseScope;
+	courseNames: ReadonlyMap<string, string>;
+}
+
+/** Resolved scope plus course display names for a source (chat or file), or
+ * null when the source belongs to no valid course. */
+export function resolveCourseGraphContext(state: CourseState, sourceId: string): CourseGraphContext | null {
+	const courseId = courseOf(state, sourceId);
+	if (courseId === null) return null;
+	const scope = resolveCourseScope(state, courseId);
+	if (!scope) return null;
+	return { scope, courseNames: new Map(state.courses.map((c) => [c.id, c.name])) };
+}
+
+/** System-prompt segment scoping a chat to its course (own folders first,
+ * included courses next, disambiguation rule). Null when no valid course. */
+export function coursePromptSegment(state: CourseState, courseId: string): string | null {
+	const scope = resolveCourseScope(state, courseId);
+	if (!scope) return null;
+	const byId = new Map(state.courses.map((c) => [c.id, c]));
+	const own = byId.get(scope.courseId);
+	if (!own) return null;
+
+	const ownFolders = scope.folders.filter((f) => f.courseId === own.id).map((f) => f.path);
+	const included = scope.courseIds.slice(1).map((id) => ({
+		name: byId.get(id)!.name,
+		folders: scope.folders.filter((f) => f.courseId === id).map((f) => f.path),
+	}));
+
+	const lines: string[] = [`## Course: ${own.name}`];
+	if (ownFolders.length > 0) {
+		lines.push(
+			`This session belongs to the course "${own.name}". Its learning material lives in these folders (read them with your file tools):`,
+		);
+		for (const folder of ownFolders) lines.push(`- ${folder} (this course)`);
+	} else {
+		lines.push(`This session belongs to the course "${own.name}".`);
+	}
+
+	if (included.length > 0) {
+		lines.push(
+			ownFolders.length === 0 && scope.folders.length > 0
+				? "Included courses (read their folders with your file tools):"
+				: "Included courses:",
+		);
+		for (const inc of included) {
+			lines.push(inc.folders.length > 0 ? `- ${inc.name}: ${inc.folders.join(", ")}` : `- ${inc.name}`);
+		}
+		lines.push(
+			'When the learner refers to material ambiguously (for example "week 1" or "the lecture on X"), resolve it to THIS course\'s material first. Use an included course\'s material only when the learner names that course or when this course has no match. Say which course material you are drawing on when it comes from an included course.',
+		);
+	} else if (ownFolders.length > 0) {
+		lines.push(
+			'When the learner refers to material ambiguously (for example "week 1" or "the lecture on X"), resolve it within this course\'s folders.',
+		);
+	}
+
+	return lines.join("\n");
+}
+
+export function coursePromptSegmentForSource(state: CourseState, sourceId: string): string | null {
+	const courseId = courseOf(state, sourceId);
+	return courseId === null ? null : coursePromptSegment(state, courseId);
+}
+
 /** Whether a source id is visible under a filter. "none" = no membership. */
 export function sourceInFilter(state: CourseState, filter: CourseFilter, sourceId: string): boolean {
 	if (filter.kind === "all") return true;

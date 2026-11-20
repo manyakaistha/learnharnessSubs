@@ -19,7 +19,7 @@ import { pluginProblemTools, isPluginProblemPoseAcknowledgment, type NativePlugi
 import { healToolRecord, withArgumentHeal } from "./tools/heal.ts";
 import { sendToUserApplies, sendToUserTool } from "./tools/send-to-user.ts";
 import { makeNarrationGuard, narrationGuardApplies, SEND_TO_USER_DELIVERY_RULE } from "./narration-guard.ts";
-import { createReadTool, readTool } from "./tools/read.ts";
+import { createReadTool, isBuiltinReadExecute, readExecuteChatId } from "./tools/read.ts";
 import { quizInputObject, quizInputProblems } from "../core/question-core.ts";
 import { QUESTION_TOOLS, TOGGLEABLE_TOOLS, type EnabledTools } from "../core/pending.ts";
 import type { PluginToolContext } from "../core/plugins.ts";
@@ -84,13 +84,18 @@ export const CONVERSATION_TOOL_NAMES = Object.freeze([
  *  tests/prompt-overrides.test.ts). Overrides are a static-file read
  *  through config paths, not request state — the store import carries no
  *  chat/job machinery. */
-export function composeInstructions(kind: AgentKind, switches?: Record<string, boolean>): string {
+export function composeInstructions(
+	kind: AgentKind,
+	switches?: Record<string, boolean>,
+	courseSegment?: string | null,
+): string {
 	const segments = effectivePromptSegments(kind, switches ?? {});
-	return segments
+	const base = segments
 		.map((s) => (s.enabled ? s.overrideText! : s.sourceText))
 		.map((t) => t.trim())
-		.filter(Boolean)
-		.join("\n\n---\n\n");
+		.filter(Boolean);
+	if (courseSegment?.trim()) base.push(courseSegment.trim());
+	return base.join("\n\n---\n\n");
 }
 
 // The switch-free source composition, cached per kind (module-load once).
@@ -148,6 +153,8 @@ export interface AgentBuildOptions {
 	 *  fresh per turn, honoring enabled overrides (switch on + file
 	 *  exists); absent → the cached pure-source composition. */
 	promptSwitches?: Record<string, boolean>;
+	/** Optional dynamic prompt segment scoping the session to its course. */
+	courseSegment?: string | null;
 	/** Native conversation identity: the existing persisted chat id, reused
 	 * across reconstructed prober, teacher, and practice Agents.
 	 * Debug: when set AND LH_PROVIDER_EVENTS=1, raw provider stream events
@@ -211,15 +218,18 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 	const stopper = makeQuestionStopper(kind);
 	const narrationGuard = narrationGuardApplies(kind, engine.model, opts.tools !== undefined);
 	const narrationHooks = narrationGuard ? makeNarrationGuard() : undefined;
-	const composedPrompt = opts.promptSwitches
+	const basePrompt = opts.promptSwitches
 		? composeInstructions(kind, opts.promptSwitches)
 		: composedInstructions[kind]!;
+	const composedPrompt = opts.courseSegment?.trim()
+		? `${basePrompt}\n\n---\n\n${opts.courseSegment.trim()}`
+		: basePrompt;
 	const builtinPrompt = narrationGuard ? `${composedPrompt}\n\n---\n\n${SEND_TO_USER_DELIVERY_RULE}` : composedPrompt;
 	// Bind native read and preserve the kind/model-aware Claude output gate
 	// before resolving additive plugins. Explicit registries remain caller-owned.
 	const builtinTools = [
-		...tools.map((tool) => tool.name === "read" && tool.execute === readTool.execute
-			? { ...tool, execute: createReadTool(engine.model).execute as AgentTool<any>["execute"] }
+		...tools.map((tool) => tool.name === "read" && isBuiltinReadExecute(tool.execute)
+			? { ...tool, execute: createReadTool(engine.model, readExecuteChatId(tool.execute) ?? opts.chatId).execute as AgentTool<any>["execute"] }
 			: tool),
 		...(sendToUserApplies(kind, engine.model, opts.tools !== undefined)
 			? [withArgumentHeal(sendToUserTool)]

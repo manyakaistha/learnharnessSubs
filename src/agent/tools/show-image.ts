@@ -32,7 +32,7 @@ export function createShowImageTool(ctx: { chatId: string; chatStore: Pick<ChatS
 			"Show a picture again only when resurfacing it meaningfully helps the current explanation. Local paths follow File access settings; use ls to discover allowed folders.",
 		parameters: showImageInput,
 		execute: serverExecute("show_image", showImageInput, async ({ path, caption }, { signal }): Promise<ImageFileResult> => {
-			const image = await loadLearnerImage(path, signal);
+			const image = await loadLearnerImage(path, signal, ctx.chatId);
 			ctx.chatStore.saveImageSnapshot(ctx.chatId, image.snapshotId, image);
 			const trimmed = caption?.trim();
 			const details: ShowImageDetails = {

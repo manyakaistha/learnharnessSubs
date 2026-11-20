@@ -30,6 +30,9 @@ import {
 import { runPiTurn } from "./pi/ui-stream.ts";
 import { setFileAccessPolicy } from "../agent/tools/file-access.ts";
 import { fileAccessPolicy } from "./file-access.ts";
+import { coursePromptSegmentForSource, resolveCourseGraphContext } from "../core/courses.ts";
+import { getGraph, scopedGraphNodes } from "../core/graph.ts";
+import type { GraphNode } from "../core/contracts/graph.ts";
 import { collectToolCallIds } from "./pi/call-ids.ts";
 import { providerEventNote } from "../agent/provider-events.ts";
 import { effectiveSettings, stores } from "./stores.ts";
@@ -177,8 +180,25 @@ function retentionForSlot(slot: ModelSlotName) {
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
 // The learner-filesystem policy (file-access wave): every tool registry is
 // built in this composition root, so the seam is installed here — the
-// tools read it fresh per call (allowed folders + the app's private paths).
+// tools read it fresh per call (course folders or global allowed folders +
+// the app's private paths).
 setFileAccessPolicy(fileAccessPolicy);
+
+const courseSegmentFor = (chatId: string): string | null =>
+	coursePromptSegmentForSource(stores.courseStore.read(), chatId);
+
+const courseScopeFor = (chatId: string) => () =>
+	resolveCourseGraphContext(stores.courseStore.read(), chatId);
+
+function practiceGraphNodes(chatId: string): ReadonlyArray<Pick<GraphNode, "id" | "name">> {
+	const course = resolveCourseGraphContext(stores.courseStore.read(), chatId);
+	if (!course) return stores.graphStore.readNodes();
+	const nodes = scopedGraphNodes(stores.graphStore, course.scope);
+	return [
+		...nodes.filter((n) => !n.inherited),
+		...nodes.filter((n) => n.inherited),
+	];
+}
 
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(
@@ -364,7 +384,7 @@ export async function handleChatInput(
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
 	const contextWindow = catalogContextLimits().get(modelIdForCompaction);
 	const thresholdTokens = effectiveThresholdTokens(effective.compaction?.thresholdTokens, contextWindow);
-	const systemPromptTokens = Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4);
+	const systemPromptTokens = Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher", effective.agent.prompts, courseSegmentFor(chatId)).length / 4);
 	const estimateModel = effective.compaction.includeReasoning ? conversationEngine.model : undefined;
 	const fitsSideContext = (messages: readonly LhMessage[]) => {
 		const live = messages.filter((message) => (message as { role: string }).role !== "system");
@@ -725,6 +745,7 @@ export async function handleChatInput(
 		// point as the tool delta — the agent layer composes the system
 		// prompt fresh per turn, swapping in any enabled override segments.
 		promptSwitches: effective.agent.prompts,
+		courseSegment: courseSegmentFor(chatId),
 	};
 	// PRACTICE BRANCH (owner design, 2026-10-04): a kind:"practice"
 	// session builds the practitioner from turn 1 — no prober→teacher
@@ -739,10 +760,10 @@ export async function handleChatInput(
 						chatId,
 						chatStore: stores.chatStore,
 						// TARGET VALIDATION (owner round 9): the practice tools read the
-						// WHOLE graph fresh per pose — targets validate against every
-						// proposition, not just the session's picks (pickless sessions
-						// and future graph-tools poses stay valid).
-						graphNodes: () => stores.graphStore.readNodes(),
+						// graph fresh per pose (course-scoped with own first when in a
+						// course, whole graph otherwise) — targets validate against every
+						// in-scope proposition, not just the session's picks.
+						graphNodes: () => practiceGraphNodes(chatId),
 						// THE RARELY-NEEDED SET (owner round 10): research + pdf jobs
 						// (same runner/gating as the teacher's — research honestly
 						// absent when no engine is live) and the map readers behind
@@ -753,7 +774,7 @@ export async function handleChatInput(
 							spawn: (job, input) => void jobRunner.runJob(job.id, input),
 							searchAvailable,
 						},
-						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
+						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore, courseScope: courseScopeFor(chatId) } } : {}),
 					},
 					agentOpts,
 				)
@@ -784,7 +805,7 @@ export async function handleChatInput(
 						// The map reader (wave 7): the prober reads the learner's
 						// knowledge graph through tools when the gate opens —
 						// graph master switch AND the agent.graphTools toggle.
-						...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore } : {}),
+						...(graphToolsEnabled(effective) ? { graphStore: stores.graphStore, courseScope: courseScopeFor(chatId) } : {}),
 					},
 					agentOpts,
 				);
@@ -943,7 +964,7 @@ export async function handleChatInput(
 								fresh.compaction?.thresholdTokens,
 								catalogContextLimits().get(kickModelId),
 							),
-							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher").length / 4),
+							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher", fresh.agent.prompts, courseSegmentFor(chatId)).length / 4),
 						};
 					}, chatId);
 			},
