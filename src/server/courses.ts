@@ -5,7 +5,8 @@ import path from "node:path";
 import type { CourseAction, CourseFilter, CourseState, CoursesView } from "../core/contracts/courses.ts";
 import type { SourceDirectory } from "../core/source-organization.ts";
 import { isWithin } from "../agent/tools/file-access.ts";
-import { applyCourseAction, courseClosure, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
+import { isProtectedSourcePath, isSensitivePath } from "../agent/tools/fs-shared.ts";
+import { applyCourseAction, courseClosure, courseOf, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
 import { emit } from "../core/events.ts";
 import { courseFileStatuses, courseScanning, forgetCourseStatuses, startCourseScan } from "./course-sources.ts";
 import { deleteSources, SourceDeletionError } from "./source-deletion.ts";
@@ -15,11 +16,14 @@ import { stores } from "./stores.ts";
 export class CourseInputError extends Error {}
 export class UnknownCourseError extends Error {}
 
+function expandHomePath(rawPath: string, home: string = os.homedir()): string {
+	if (rawPath === "~") return home;
+	if (rawPath.startsWith("~/") || rawPath.startsWith(`~${path.sep}`)) return path.join(home, rawPath.slice(2));
+	return rawPath;
+}
+
 function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): string {
-	let expanded: string;
-	if (rawPath === "~") expanded = home;
-	else if (rawPath.startsWith("~/")) expanded = path.join(home, rawPath.slice(2));
-	else expanded = rawPath;
+	const expanded = expandHomePath(rawPath, home);
 	if (!path.isAbsolute(expanded)) throw new CourseInputError("Folder path must be an absolute path.");
 	const normalized = path.resolve(expanded);
 	let stat: fs.Stats;
@@ -29,6 +33,31 @@ function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): 
 		throw new CourseInputError("Folder does not exist on this machine.");
 	}
 	if (!stat.isDirectory()) throw new CourseInputError("Folder path must point to a directory.");
+	return normalized;
+}
+
+function resolveSessionFilePath(rawPath: string, home: string = os.homedir()): string {
+	const expanded = expandHomePath(rawPath, home);
+	if (expanded.includes("\0") || !path.isAbsolute(expanded)) {
+		throw new CourseInputError("File path must be an absolute path.");
+	}
+	const normalized = path.resolve(expanded);
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(/* turbopackIgnore: true */ normalized);
+	} catch {
+		throw new CourseInputError("File does not exist on this machine.");
+	}
+	if (!stat.isFile()) throw new CourseInputError("File path must point to a regular file.");
+	let real: string;
+	try {
+		real = fs.realpathSync.native(/* turbopackIgnore: true */ normalized);
+	} catch {
+		throw new CourseInputError("File does not exist on this machine.");
+	}
+	if (isSensitivePath(normalized) || isSensitivePath(real) || isProtectedSourcePath(normalized)) {
+		throw new CourseInputError("File path points to a protected location.");
+	}
 	return normalized;
 }
 
@@ -108,6 +137,17 @@ export function mutateCourses(raw: unknown): CoursesView {
 			}
 		}
 		action = { ...action, path: folderPath };
+	}
+
+	if (action.action === "attach-session-files") {
+		if (!stores.chatStore.getChat(action.chatId)) {
+			throw new CourseInputError("Session no longer exists.");
+		}
+		const chatCourseId = courseOf(state, action.chatId);
+		if (!chatCourseId || !state.courses.some((c) => c.id === chatCourseId)) {
+			throw new CourseInputError("Session does not belong to a course.");
+		}
+		action = { ...action, paths: [...new Set(action.paths.map((p) => resolveSessionFilePath(p)))] };
 	}
 
 	if (action.action === "delete") {

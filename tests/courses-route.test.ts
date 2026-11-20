@@ -413,3 +413,61 @@ it("malformed, oversized bodies return 400 and corrupt courses.json returns 500 
 		fs.writeFileSync(COURSES_FILE, before);
 	}
 });
+
+it("attach-session-files validates course membership, regular files, ~ expansion, and sensitivity", async () => {
+	const courseId = (await (await postCourse({ action: "create", name: "Systems" })).json()).courses[0].id as string;
+	const courseChat = stores.chatStore.createChat("In course");
+	const freeChat = stores.chatStore.createChat("No course");
+	await postCourse({ action: "assign", sourceId: courseChat.id, courseId });
+
+	const dir = path.join(root, "attach-dir");
+	fs.mkdirSync(dir, { recursive: true });
+	const okFile = path.join(dir, "lecture.md");
+	fs.writeFileSync(okFile, "# Lecture");
+	const envFile = path.join(dir, ".env");
+	fs.writeFileSync(envFile, "SECRET=1");
+	const symlinkToAuth = path.join(dir, "alias.txt");
+	fs.symlinkSync(process.env.LH_AUTH_FILE!, symlinkToAuth);
+
+	// Unknown chat and non-course chat -> 400
+	assert.equal((await postCourse({ action: "attach-session-files", chatId: "chat_missing", paths: [okFile] })).status, 400);
+	assert.equal((await postCourse({ action: "attach-session-files", chatId: freeChat.id, paths: [okFile] })).status, 400);
+
+	// Empty paths, relative, missing, dir, sensitive (.env, auth file, symlink to auth) -> 400
+	for (const badPaths of [
+		[],
+		["relative/lecture.md"],
+		[path.join(dir, "missing.md")],
+		[dir],
+		[envFile],
+		[process.env.LH_AUTH_FILE!],
+		[symlinkToAuth],
+	]) {
+		assert.equal((await postCourse({ action: "attach-session-files", chatId: courseChat.id, paths: badPaths })).status, 400, JSON.stringify(badPaths));
+	}
+
+	// Unnormalized absolute path and ~ expansion normalize and store
+	const homeDir = path.join(root, "fake-home");
+	const homeFile = path.join(homeDir, "notes", "handout.txt");
+	fs.mkdirSync(path.dirname(homeFile), { recursive: true });
+	fs.writeFileSync(homeFile, "Handout");
+	const prevHome = process.env.HOME;
+	const prevProfile = process.env.USERPROFILE;
+	process.env.HOME = homeDir;
+	process.env.USERPROFILE = homeDir;
+	try {
+		const res = await postCourse({
+			action: "attach-session-files",
+			chatId: courseChat.id,
+			paths: [path.join(dir, "..", "attach-dir", "lecture.md"), "~/notes/handout.txt"],
+		});
+		assert.equal(res.status, 200);
+		assert.deepEqual(stores.courseStore.read().sessionFiles[courseChat.id], [
+			path.resolve(okFile),
+			path.resolve(homeFile),
+		]);
+	} finally {
+		if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+		if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+	}
+});

@@ -163,6 +163,17 @@ function sourcePathCheck(home = os.homedir()): (absolute: string) => boolean {
 		files.some((p) => isWithin(absolute, p)) || isCredentialTemp(absolute, credentialDir, path.basename(comparisonPath(AUTH_FILE)));
 }
 
+/** True when `absolute` or its canonical target resolves to a protected location. */
+export function isProtectedSourcePath(absolute: string, home: string = os.homedir()): boolean {
+	const denied = sourcePathCheck(home);
+	if (denied(absolute)) return true;
+	try {
+		return denied(realOrMissing(absolute));
+	} catch {
+		return true;
+	}
+}
+
 function checkedSourcePath(absolute: string, denied: (absolute: string) => boolean): string {
 	const refuse = () => {
 		throw new Error(
