@@ -205,15 +205,19 @@ async function runExtractWithBusyRetry(
 	}
 }
 
-async function runCourseScan(courseId: string): Promise<void> {
+async function runCourseScan(courseId: string, initialFolders: CourseFolder[] = []): Promise<void> {
 	const rt = runtime();
+	let knownFolders: CourseFolder[] = initialFolders;
 	try {
+		// Yield once so startCourseScan registers `activeScans` before `finally` can ever run.
+		await Promise.resolve();
 		const initial = stores.courseStore.read();
 		const course = initial.courses.find((c) => c.id === courseId);
 		if (!course) {
 			rt.statuses.delete(courseId);
 			return;
 		}
+		knownFolders = course.folders;
 
 		const discovered = await discoverCourseFiles(course.folders);
 		const afterWalk = stores.courseStore.read();
@@ -223,6 +227,7 @@ async function runCourseScan(courseId: string): Promise<void> {
 			emit("courses-changed", {});
 			return;
 		}
+		knownFolders = stillCourse.folders;
 
 		const activeFolderIds = new Set(stillCourse.folders.map((f) => f.id));
 		const statuses: CourseFileStatus[] = [];
@@ -408,10 +413,57 @@ async function runCourseScan(courseId: string): Promise<void> {
 				emit("courses-changed", {});
 			}
 		}
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		console.error(`[course-sources] scan failed for course ${courseId}:`, err);
+		const existing = rt.statuses.get(courseId);
+		if (existing && existing.length > 0) {
+			let updatedPending = false;
+			const nextStatuses = existing.map((s) => {
+				if (s.state === "queued" || s.state === "extracting") {
+					updatedPending = true;
+					return { path: s.path, folderId: s.folderId, state: "failed" as const, error: message };
+				}
+				return s;
+			});
+			if (!updatedPending && knownFolders.length > 0) {
+				for (const folder of knownFolders) {
+					if (!nextStatuses.some((s) => s.path === folder.path && s.folderId === folder.id)) {
+						nextStatuses.push({ path: folder.path, folderId: folder.id, state: "failed", error: message });
+					}
+				}
+			}
+			rt.statuses.set(courseId, nextStatuses);
+		} else if (knownFolders.length > 0) {
+			rt.statuses.set(
+				courseId,
+				knownFolders.map((folder) => ({
+					path: folder.path,
+					folderId: folder.id,
+					state: "failed",
+					error: message,
+				})),
+			);
+		}
+		try {
+			emit("courses-changed", {});
+		} catch (emitErr) {
+			console.error(`[course-sources] failed to emit courses-changed for ${courseId}:`, emitErr);
+		}
 	} finally {
 		rt.activeScans.delete(courseId);
-		emit("courses-changed", {});
-		if (rt.pendingScans.delete(courseId)) startCourseScan(courseId);
+		try {
+			emit("courses-changed", {});
+		} catch (emitErr) {
+			console.error(`[course-sources] failed to emit courses-changed for ${courseId}:`, emitErr);
+		}
+		if (rt.pendingScans.delete(courseId)) {
+			try {
+				startCourseScan(courseId);
+			} catch (rescanErr) {
+				console.error(`[course-sources] failed to start queued rescan for ${courseId}:`, rescanErr);
+			}
+		}
 	}
 }
 
@@ -430,7 +482,9 @@ export function startCourseScan(courseId: string): void {
 		}
 		return;
 	}
-	const pass = runCourseScan(courseId);
+	const pass = runCourseScan(courseId, course.folders).catch((err) => {
+		console.error(`[course-sources] unexpected scan error for ${courseId}:`, err);
+	});
 	rt.activeScans.set(courseId, pass);
 	emit("courses-changed", {});
 }

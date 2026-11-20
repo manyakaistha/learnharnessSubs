@@ -494,3 +494,94 @@ it("scans an attached folder whose own path is hidden while skipping dot-prefixe
 	assert.deepEqual(seen, [".hidden-vault/lecture.md", ".hidden-vault/sub/details.md"]);
 	assert.deepEqual(courseFileStatuses(courseId).map((s) => s.path).sort(), [visible, nested].sort());
 });
+
+it("catches scan-level store failures, marks pending files failed, emits courses-changed, and still runs queued follow-up rescans without unhandled rejections", async (t) => {
+	const folder = path.join(root, "scan-level-failure");
+	const f1 = writeText(path.join(folder, "01_first.md"), "# First");
+	const f2 = writeText(path.join(folder, "02_second.md"), "# Second");
+	const { courseId, folderId } = createCourseWithFolder("ScanFailure", folder);
+
+	const rejections: unknown[] = [];
+	const onRejection = (reason: unknown) => rejections.push(reason);
+	process.on("unhandledRejection", onRejection);
+	const logged: unknown[][] = [];
+	t.mock.method(console, "error", (...args: unknown[]) => { logged.push(args); });
+
+	const events: string[] = [];
+	const unsub = subscribe((ev) => events.push(ev.type));
+	const origRead = stores.courseStore.read.bind(stores.courseStore);
+	const origWrite = stores.courseStore.write.bind(stores.courseStore);
+	let throwOnNextLoopRead = false;
+
+	try {
+		// 1) Mid-queue scan-level failure after 01_first.md commits and while 02_second.md is queued
+		t.mock.method(stores.courseStore, "write", (nextState: Parameters<typeof origWrite>[0]) => {
+			origWrite(nextState);
+			throwOnNextLoopRead = true;
+		});
+		t.mock.method(stores.courseStore, "read", () => {
+			if (throwOnNextLoopRead) {
+				throwOnNextLoopRead = false;
+				throw new Error("Simulated mid-scan store read failure");
+			}
+			return origRead();
+		});
+
+		setCourseExtractorForTests(async () => ({ nodes: 1, chains: 0 }));
+
+		startCourseScan(courseId);
+		while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+
+		assert.equal(courseScanning(courseId), false);
+		assert.equal(rejections.length, 0, "must not produce unhandledRejection");
+		assert.ok(logged.length >= 1, "scan-level error is logged");
+		assert.ok(events.includes("courses-changed"));
+
+		const statuses = courseFileStatuses(courseId);
+		assert.equal(statuses.find((s) => s.path === f1)?.state, "extracted");
+		assert.deepEqual(statuses.find((s) => s.path === f2), {
+			path: f2,
+			folderId,
+			state: "failed",
+			error: "Simulated mid-scan store read failure",
+		});
+
+		// 2) Pre-queue scan-level failure while a follow-up rescan is queued: finally cleanup + follow-up scan recover
+		events.length = 0;
+		let throwOnceDuringScan = false;
+		let queuedFollowup!: () => void;
+		const followupQueued = new Promise<void>((r) => { queuedFollowup = r; });
+		let readCount = 0;
+		t.mock.restoreAll();
+		t.mock.method(console, "error", (...args: unknown[]) => { logged.push(args); });
+		t.mock.method(stores.courseStore, "read", () => {
+			readCount++;
+			// Start throwing after startCourseScan's own read and first read in runCourseScan, while queueing follow-up
+			if (throwOnceDuringScan && readCount === 2) {
+				throwOnceDuringScan = false;
+				startCourseScan(courseId);
+				queuedFollowup();
+				throw new Error("Simulated discovery-phase store read failure");
+			}
+			return origRead();
+		});
+		setCourseExtractorForTests(async () => ({ nodes: 1, chains: 0 }));
+
+		throwOnceDuringScan = true;
+		readCount = 0;
+		startCourseScan(courseId);
+		await followupQueued;
+		while (courseScanning(courseId)) await waitForCourseScanForTests(courseId);
+
+		assert.equal(courseScanning(courseId), false);
+		assert.equal(rejections.length, 0);
+		assert.ok(events.includes("courses-changed"));
+		const recovered = courseFileStatuses(courseId);
+		assert.equal(recovered.find((s) => s.path === f1)?.state, "extracted");
+		assert.equal(recovered.find((s) => s.path === f2)?.state, "extracted");
+	} finally {
+		unsub();
+		t.mock.restoreAll();
+		process.off("unhandledRejection", onRejection);
+	}
+});
