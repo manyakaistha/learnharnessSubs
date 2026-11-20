@@ -63,7 +63,10 @@ import type {
 	GraphNode,
 	ProvenancePoint,
 	GraphSnapshot,
+	GraphSnapshotNode,
 } from "./contracts.ts";
+import type { CourseFilter, CourseScope, CourseState } from "./contracts/courses.ts";
+import { projectCourseGraph, projectUnassignedGraph, resolveCourseScope } from "./courses.ts";
 import { MIN_CLUSTER_SIZE } from "./clusters.ts";
 import { formatChainLine } from "./chains.ts";
 import { attachImpToCommunities, birthSessionOf, birthSessionPartition } from "./session-clusters.ts";
@@ -507,14 +510,38 @@ export function deriveView(graph: DerivedGraph): {
 // ─── the /api/graph payload ──────────────────────────────────────────────────
 
 /** Everything the home graph view needs, in one fetch (shape: contracts). */
-export function graphSnapshot(deps: GraphDeps, sourceNames: Readonly<Record<string, string>> = {}): GraphSnapshot {
-	const graph = getGraph(deps.graphStore);
+export function graphSnapshot(
+	deps: GraphDeps,
+	sourceNames: Readonly<Record<string, string>> = {},
+	courseFilter?: { state: CourseState; filter: CourseFilter },
+): GraphSnapshot {
+	const rawGraph = getGraph(deps.graphStore);
+	let graph: DerivedGraph = rawGraph;
+	let scope: CourseScope | null = null;
+	if (courseFilter && courseFilter.filter.kind === "none") {
+		graph = projectUnassignedGraph(courseFilter.state, rawGraph);
+	} else if (courseFilter && courseFilter.filter.kind === "course") {
+		scope = resolveCourseScope(courseFilter.state, courseFilter.filter.courseId);
+		if (!scope) throw new Error(`Course not found: ${courseFilter.filter.courseId}`);
+		graph = projectCourseGraph(rawGraph, scope);
+	}
 	// The canvas-facing lossy image: propositions + derived implication
 	// nodes, untyped arrows. `chains` (the stored truth) ride along for
 	// the chain table — it reads the truth, never the derived fan-out,
 	// never the derived fan-out.
 	const view = deriveView(graph);
-	const nodes = view.nodes;
+	let nodes: GraphSnapshotNode[] = view.nodes;
+	if (scope) {
+		const activeScope = scope;
+		const chainById = new Map(graph.chains.map((c) => [c.id, c]));
+		nodes = view.nodes.map((node) => {
+			if ("inherited" in node && "courses" in node) return node as GraphSnapshotNode;
+			const chain = chainById.get(node.id);
+			const points = (chain?.provenance ?? node.provenance).filter((pt) => activeScope.sources.has(pt.chatId));
+			const courses = activeScope.courseIds.filter((c) => points.some((pt) => activeScope.sourceCourse.get(pt.chatId) === c));
+			return { ...node, inherited: !points.some((pt) => activeScope.ownSources.has(pt.chatId)), courses };
+		});
+	}
 
 	const nodeChats = new Map<string, Set<string>>();
 	const touch = (nodeId: string, chatId: string): void => {
@@ -566,15 +593,26 @@ export function graphSnapshot(deps: GraphDeps, sourceNames: Readonly<Record<stri
 	// but renders unlabeled — honest, never guessed.
 	// PROPOSITIONS ONLY (owner, 2026-09-30): derived implication nodes
 	// never partition — the stored world clusters, its image follows.
+	const courseNameById = scope
+		? new Map(courseFilter!.state.courses.map((c) => [c.id, c.name]))
+		: null;
 	const communities = birthSessionPartition(graph.nodes);
 	const clusters: Cluster[] = communities
 		.filter((community) => community.members.length >= MIN_CLUSTER_SIZE)
 		.map((community) => {
 			// Display names never replace the original provenance path.
 			const file = fileSources[community.id];
+			let label = sessions[community.id] ?? (file === undefined ? null : sourceNames[community.id] ?? sourceFileLabel(file));
+			if (scope && courseNameById && label !== null) {
+				const ownerCourseId = scope.sourceCourse.get(community.id);
+				if (ownerCourseId && ownerCourseId !== scope.courseId) {
+					const ownerName = courseNameById.get(ownerCourseId);
+					if (ownerName) label = `${ownerName} · ${label}`;
+				}
+			}
 			return {
 				id: community.id,
-				label: sessions[community.id] ?? (file === undefined ? null : sourceNames[community.id] ?? sourceFileLabel(file)),
+				label,
 				members: community.members,
 			};
 		});

@@ -11,6 +11,7 @@ import {
 } from "../core/graph-deletion.ts";
 import { extractionStatuses } from "../agent/subagents/extraction.ts";
 import { stores } from "./stores.ts";
+import { parseCourseFilterParam } from "./courses.ts";
 import { callCost } from "./pricing.ts";
 
 /**
@@ -19,10 +20,11 @@ import { callCost } from "./pricing.ts";
  * answers in sessions (turn-service), never from here — the home view
  * reflects whatever the pipeline has merged so far.
  */
-export function graphView(): GraphSnapshot {
+export function graphView(courseParam?: string | null): GraphSnapshot {
 	const organization = stores.sourceOrganizationStore.read();
 	const names = Object.fromEntries(Object.entries(organization.placements).flatMap(([id, p]) => p.name === undefined ? [] : [[id, p.name]]));
-	return graphSnapshot(stores, names);
+	const courseFilter = parseCourseFilterParam(courseParam);
+	return courseFilter ? graphSnapshot(stores, names, courseFilter) : graphSnapshot(stores, names);
 }
 
 /** The graph view's cost surface (GET /api/graph/costs — the 2026-09 cost

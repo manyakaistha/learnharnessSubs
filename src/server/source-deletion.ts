@@ -2,6 +2,7 @@ import { deleteSourcesTraces } from "../core/graph-deletion.ts";
 import { folderIsEmpty, type SourceDirectory } from "../core/source-organization.ts";
 import { extractionStatuses } from "../agent/subagents/extraction.ts";
 import { stores } from "./stores.ts";
+import { removeSourcesFromCourses } from "./courses.ts";
 import { sourceDirectory } from "./source-organization.ts";
 import { deleteIdleChatRecord, runningWorkBlocker } from "./chats.ts";
 import { graphRevision } from "./graph.ts";
@@ -64,5 +65,6 @@ export function deleteSources(raw: unknown): SourceDirectory & { graphRevision: 
 		}
 	}
 	if (JSON.stringify(state) !== JSON.stringify(directory.organization)) stores.sourceOrganizationStore.write(state);
+	removeSourcesFromCourses(removed);
 	return { ...sourceDirectory.read(), graphRevision: graphRevision() };
 }

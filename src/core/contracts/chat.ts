@@ -320,6 +320,8 @@ export interface ChatListItem extends ChatSummary {
 	/** True while background context compaction holds the chat's model gate.
 	 * Supplied by the live compaction registry, not by saved compaction markers. */
 	compacting: boolean;
+	/** Owning course id, or null when unassigned ("No course"). */
+	courseId?: string | null;
 }
 
 // ─── Learner images in the lesson (issue #363) ──────────────────────────────

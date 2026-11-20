@@ -5,6 +5,7 @@ import { deleteChatTraces, type ChatDeleteMode, type ChatDeletionStats } from ".
 import { titleFromPrompt } from "../core/contracts.ts";
 import { graphRevision } from "./graph.ts";
 import { stores } from "./stores.ts";
+import { removeSourcesFromCourses } from "./courses.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 import { clearTurnFailure } from "./turn-runs.ts";
 import { discardChatDeliveries } from "./jobs.ts";
@@ -154,6 +155,7 @@ function finishChatRecordDeletion(chatId: string): number {
 		discardChatDeliveries(chatId);
 		clearTurnFailure(chatId);
 		sideChats.stopAll(chatId); // a running side answer has nowhere left to land
+		removeSourcesFromCourses(new Set([chatId]));
 	}
 	return jobsRemoved;
 }

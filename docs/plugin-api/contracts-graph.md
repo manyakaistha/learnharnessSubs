@@ -11,6 +11,7 @@
 - [GraphEdge](#graphedge) — supporting declaration
 - [GraphNode](#graphnode)
 - [GraphSnapshot](#graphsnapshot)
+- [GraphSnapshotNode](#graphsnapshotnode) — supporting declaration
 - [NotesSource](#notessource)
 - [Position](#position)
 - [ProvenancePoint](#provenancepoint) — supporting declaration
@@ -358,8 +359,8 @@ layout and provenance data. Derived arrows/junctions are not stored arguments.
 
 ```ts
 export interface GraphSnapshot {
-    nodes: GraphNode[];
-    propositions: GraphNode[];
+    nodes: GraphSnapshotNode[];
+    propositions: GraphSnapshotNode[];
     edges: GraphEdge[];
     logicalEdges: GraphEdge[];
     impLinks: Array<{
@@ -376,7 +377,7 @@ export interface GraphSnapshot {
 }
 ```
 
-**Related types:** [Cluster](contracts-graph.md#cluster), [GraphChain](contracts-graph.md#graphchain), [GraphEdge](contracts-graph.md#graphedge), [GraphNode](contracts-graph.md#graphnode), [Position](contracts-graph.md#position).
+**Related types:** [Cluster](contracts-graph.md#cluster), [GraphChain](contracts-graph.md#graphchain), [GraphEdge](contracts-graph.md#graphedge), [GraphSnapshotNode](contracts-graph.md#graphsnapshotnode), [Position](contracts-graph.md#position).
 
 **Member index** (including nested object members; inherited members are defined in the linked base types):
 
@@ -398,7 +399,7 @@ Canvas nodes: propositions plus derived implication nodes for multi-premise
 chains. Each implication node uses its chain's ID.
 
 ```ts
-nodes: GraphNode[];
+nodes: GraphSnapshotNode[];
 ```
 
 ### GraphSnapshot propositions
@@ -408,7 +409,7 @@ The STORED proposition nodes alone (no derived implication nodes)
 (the chain table) take this list, never the canvas image.
 
 ```ts
-propositions: GraphNode[];
+propositions: GraphSnapshotNode[];
 ```
 
 ### GraphSnapshot edges
@@ -500,6 +501,43 @@ the view then falls back to its own one-shot forceAtlas2 pass.
 
 ```ts
 positions?: Record<string, Position>;
+```
+
+## GraphSnapshotNode
+
+Supporting declaration used by a public type. This is not an additional runtime API or SDK helper.
+
+A node returned inside GraphSnapshot. Unfiltered snapshots carry plain
+GraphNode fields; course-scoped snapshots add `inherited` and `courses`.
+
+```ts
+export interface GraphSnapshotNode extends GraphNode {
+    inherited?: boolean;
+    courses?: string[];
+}
+```
+
+**Related types:** [GraphNode](contracts-graph.md#graphnode).
+
+**Member index** (including nested object members; inherited members are defined in the linked base types):
+
+- [inherited](#graphsnapshotnode-inherited)
+- [courses](#graphsnapshotnode-courses)
+
+### GraphSnapshotNode inherited
+
+True when no provenance point belongs to the course's own sources.
+
+```ts
+inherited?: boolean;
+```
+
+### GraphSnapshotNode courses
+
+Courses (in scope) this node has provenance in, the course first.
+
+```ts
+courses?: string[];
 ```
 
 ## NotesSource

@@ -280,16 +280,25 @@ export interface Cluster {
 	members: string[];
 }
 
+/** A node returned inside GraphSnapshot. Unfiltered snapshots carry plain
+ * GraphNode fields; course-scoped snapshots add `inherited` and `courses`. */
+export interface GraphSnapshotNode extends GraphNode {
+	/** True when no provenance point belongs to the course's own sources. */
+	inherited?: boolean;
+	/** Courses (in scope) this node has provenance in, the course first. */
+	courses?: string[];
+}
+
 /** Graph projection containing stored propositions/chains and derived rendering,
  * layout and provenance data. Derived arrows/junctions are not stored arguments. */
 export interface GraphSnapshot {
 	/** Canvas nodes: propositions plus derived implication nodes for multi-premise
 	 * chains. Each implication node uses its chain's ID. */
-	nodes: GraphNode[];
+	nodes: GraphSnapshotNode[];
 	/** The STORED proposition nodes alone (no derived implication nodes)
 	 *  — the stored truth, like `chains`: consumers that read the world
 	 *  (the chain table) take this list, never the canvas image. */
-	propositions: GraphNode[];
+	propositions: GraphSnapshotNode[];
 	/** Derived canvas arrows: direct premise → conclusion for single-premise
 	 * chains, or premise → implication node → conclusion for multi-premise chains.
 	 * Rebuilt from chains, not stored separately. */

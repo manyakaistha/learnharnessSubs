@@ -1,11 +1,15 @@
-import { deleteSources, readOrganizationAction, sourceDirectory, SourceDeletionError, SourceOrganizationInputError } from "@/src/server";
+import { deleteSources, readOrganizationAction, scopedSourceDirectory, sourceDirectory, SourceDeletionError, SourceOrganizationInputError, UnknownCourseError } from "@/src/server";
 import { emit } from "@/src/core";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-	try { return Response.json(sourceDirectory.read()); }
-	catch { return Response.json({ error: "Could not read source organization." }, { status: 500 }); }
+export async function GET(request?: Request) {
+	const course = request ? new URL(request.url).searchParams.get("course") : null;
+	try { return Response.json(scopedSourceDirectory(course)); }
+	catch (error) {
+		if (error instanceof UnknownCourseError) return Response.json({ error: error.message }, { status: 404 });
+		return Response.json({ error: "Could not read source organization." }, { status: 500 });
+	}
 }
 
 export async function DELETE(request: Request) {

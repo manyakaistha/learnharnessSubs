@@ -1,4 +1,4 @@
-import { chainsForSelection, formatChainLine } from "@/src/core";
+import { applyCourseAction, chainsForSelection, courseOf, formatChainLine } from "@/src/core";
 import { newGraphContextMessage, type GraphContextPick } from "@/src/core";
 import { compactionInFlight, createChat, isTurnRunning, listChats, readSettingsRecord, stores, titleFromPrompt } from "@/src/server";
 import type { ChatListItem } from "@/src/core";
@@ -11,21 +11,39 @@ import type { ChatListItem } from "@/src/core";
  *  (a running spinner per row would double-signal them), so busy means
  *  exactly "a teach turn is in flight". */
 export async function GET() {
+	const courseState = stores.courseStore.read();
 	const chats: ChatListItem[] = listChats().map((c) => ({
 		...c,
 		busy: isTurnRunning(c.id),
 		compacting: compactionInFlight(c.id),
+		courseId: courseOf(courseState, c.id),
 	}));
 	return Response.json({ chats });
 }
 
 export async function POST(req: Request) {
-	const body = (await req.json().catch(() => ({}))) as { title?: unknown; kind?: unknown; graphContext?: unknown };
+	const body = (await req.json().catch(() => ({}))) as { title?: unknown; kind?: unknown; graphContext?: unknown; courseId?: unknown };
+	let courseId: string | null = null;
+	let courseState: ReturnType<typeof stores.courseStore.read> | null = null;
+	if (body.courseId !== undefined && body.courseId !== null) {
+		if (typeof body.courseId !== "string" || !body.courseId.trim()) {
+			return Response.json({ error: "Unknown course." }, { status: 400 });
+		}
+		courseState = stores.courseStore.read();
+		if (!courseState.courses.some((c) => c.id === body.courseId)) {
+			return Response.json({ error: "Unknown course." }, { status: 400 });
+		}
+		courseId = body.courseId;
+	}
 	const title = typeof body.title === "string" ? body.title : "";
 	// Practice sessions (owner, 2026-10-04): kind "practice" marks the
 	// record — the practice agent + its tools from turn 1, no extraction.
 	const kind = body.kind === "practice" ? ("practice" as const) : undefined;
 	const chat = createChat(titleFromPrompt(title || "Untitled session"), kind);
+	if (courseId && courseState) {
+		const next = applyCourseAction(courseState, { action: "assign", sourceId: chat.id, courseId }, { id: "", at: new Date().toISOString() });
+		stores.courseStore.write(next);
+	}
 	// PER-SESSION MODELS (owner, 2026-09-28): a session owns its model +
 	// thinking level from birth — stamped verbatim from the STRONG slot,
 	// the new-session default. From here the strong slot never reaches

@@ -116,6 +116,7 @@ jobs do not make the session busy. These flags are not persisted status.
 export interface ChatListItem extends ChatSummary {
     busy: boolean;
     compacting: boolean;
+    courseId?: string | null;
 }
 ```
 
@@ -125,6 +126,7 @@ export interface ChatListItem extends ChatSummary {
 
 - [busy](#chatlistitem-busy)
 - [compacting](#chatlistitem-compacting)
+- [courseId](#chatlistitem-courseid)
 
 ### ChatListItem busy
 
@@ -139,6 +141,14 @@ Supplied by the live compaction registry, not by saved compaction markers.
 
 ```ts
 compacting: boolean;
+```
+
+### ChatListItem courseId
+
+Owning course id, or null when unassigned ("No course").
+
+```ts
+courseId?: string | null;
 ```
 
 ## ChatRecord
