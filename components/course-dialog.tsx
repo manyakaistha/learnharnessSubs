@@ -307,7 +307,17 @@ export function NewCourseDialog({
 	);
 }
 
-function FileStatusRow({ file, folderPath }: { file: CourseFileStatus; folderPath?: string }) {
+function FileStatusRow({
+	file,
+	folderPath,
+	onIncludeFile,
+	includeBusy = false,
+}: {
+	file: CourseFileStatus;
+	folderPath?: string;
+	onIncludeFile?: (path: string) => void;
+	includeBusy?: boolean;
+}) {
 	const label = displayCourseFilePath(file.path, folderPath);
 	return (
 		<div data-testid="course-file-row" className="flex flex-col gap-0.5 py-0.5 pl-3 text-xs">
@@ -315,19 +325,32 @@ function FileStatusRow({ file, folderPath }: { file: CourseFileStatus; folderPat
 				<span title={file.path} className="min-w-0 truncate font-ui text-muted-foreground">
 					{label}
 				</span>
-				<span
-					data-testid="course-file-state"
-					className={
-						"flex shrink-0 items-center gap-1 font-ui text-[11px] " +
-						(file.state === "failed"
-							? "text-destructive"
-							: file.state === "extracting"
-								? "text-foreground"
-								: "text-muted-foreground/80")
-					}
-				>
-					{file.state === "extracting" && <Loader2Icon aria-hidden="true" className="size-3 animate-spin" />}
-					{FILE_STATE_LABEL[file.state]}
+				<span className="flex shrink-0 items-center gap-2">
+					{file.state === "excluded" && onIncludeFile && (
+						<button
+							type="button"
+							data-testid="course-file-include"
+							disabled={includeBusy}
+							onClick={() => onIncludeFile(file.path)}
+							className="rounded-sm border border-border px-1.5 py-0.5 font-ui text-[11px] text-foreground transition-colors hover:bg-accent disabled:opacity-40"
+						>
+							Include again
+						</button>
+					)}
+					<span
+						data-testid="course-file-state"
+						className={
+							"flex items-center gap-1 font-ui text-[11px] " +
+							(file.state === "failed"
+								? "text-destructive"
+								: file.state === "extracting"
+									? "text-foreground"
+									: "text-muted-foreground/80")
+						}
+					>
+						{file.state === "extracting" && <Loader2Icon aria-hidden="true" className="size-3 animate-spin" />}
+						{FILE_STATE_LABEL[file.state]}
+					</span>
 				</span>
 			</div>
 			{file.state === "failed" && file.error && (
@@ -359,6 +382,8 @@ export function CoursePanelBody({
 	canBrowseFolder = false,
 	onBrowseFolder,
 	onRemoveFolder,
+	onIncludeFile,
+	includeBusy = false,
 	rescanBusy,
 	rescanError,
 	onRescan,
@@ -384,6 +409,8 @@ export function CoursePanelBody({
 	canBrowseFolder?: boolean;
 	onBrowseFolder?: () => void;
 	onRemoveFolder: (folderId: string) => void;
+	onIncludeFile?: (path: string) => void;
+	includeBusy?: boolean;
 	rescanBusy: boolean;
 	rescanError: string;
 	onRescan: () => void;
@@ -579,25 +606,32 @@ export function CoursePanelBody({
 						<div className="flex flex-col gap-3" data-testid="course-folders-list">
 							{course.folders.map((folder) => {
 								const files = course.files.filter((f) => f.folderId === folder.id);
+								const folderLabel = folder.managed ? "Course files (copied)" : folder.path;
 								return (
 									<div key={folder.id} data-testid={`course-folder-${folder.id}`} className="flex flex-col gap-1">
 										<div className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-background/50 px-3 py-1.5 text-xs">
-											<span title={folder.path} className="min-w-0 truncate font-ui text-foreground">
-												{folder.path}
+											<span title={folderLabel} className="min-w-0 truncate font-ui text-foreground">
+												{folderLabel}
 											</span>
 											<button
 												type="button"
-												aria-label={`Remove ${folder.path}`}
+												aria-label={folder.managed ? "Remove copied course files from course" : `Remove ${folder.path}`}
 												data-testid={`course-folder-remove-${folder.id}`}
 												disabled={folderBusy}
 												onClick={() => onRemoveFolder(folder.id)}
 												className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
 											>
-												Remove
+												{folder.managed ? "Remove from course" : "Remove"}
 											</button>
 										</div>
 										{files.map((file) => (
-											<FileStatusRow key={`${file.folderId}:${file.path}`} file={file} folderPath={folder.path} />
+											<FileStatusRow
+												key={`${file.folderId}:${file.path}`}
+												file={file}
+												folderPath={folder.path}
+												onIncludeFile={onIncludeFile}
+												includeBusy={includeBusy}
+											/>
 										))}
 									</div>
 								);
@@ -607,7 +641,12 @@ export function CoursePanelBody({
 					{orphanFiles.length > 0 && (
 						<div className="flex flex-col gap-1">
 							{orphanFiles.map((file) => (
-								<FileStatusRow key={`${file.folderId}:${file.path}`} file={file} />
+								<FileStatusRow
+									key={`${file.folderId}:${file.path}`}
+									file={file}
+									onIncludeFile={onIncludeFile}
+									includeBusy={includeBusy}
+								/>
 							))}
 						</div>
 					)}
@@ -657,6 +696,7 @@ export function CoursePanelDialog({
 	const [folderInput, setFolderInput] = useState("");
 	const [folderError, setFolderError] = useState("");
 	const [folderBusy, setFolderBusy] = useState(false);
+	const [includeBusy, setIncludeBusy] = useState(false);
 
 	const [rescanBusy, setRescanBusy] = useState(false);
 	const [rescanError, setRescanError] = useState("");
@@ -751,6 +791,19 @@ export function CoursePanelDialog({
 		}
 	};
 
+	const handleIncludeFile = async (filePath: string) => {
+		if (includeBusy) return;
+		setIncludeBusy(true);
+		setFolderError("");
+		try {
+			await mutate({ action: "include-file", id: course.id, path: filePath });
+		} catch (err) {
+			setFolderError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setIncludeBusy(false);
+		}
+	};
+
 	const handleRescan = async () => {
 		if (rescanBusy) return;
 		setRescanBusy(true);
@@ -804,6 +857,8 @@ export function CoursePanelDialog({
 				canBrowseFolder={canBrowseFolder}
 				onBrowseFolder={() => void handleBrowseFolder()}
 				onRemoveFolder={(folderId) => void handleRemoveFolder(folderId)}
+				onIncludeFile={(filePath) => void handleIncludeFile(filePath)}
+				includeBusy={includeBusy}
 				rescanBusy={rescanBusy}
 				rescanError={rescanError}
 				onRescan={() => void handleRescan()}
