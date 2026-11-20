@@ -26,11 +26,14 @@ export function createFindTool(chatId?: string): AgentTool<typeof findInput> {
 			if (ctx?.signal?.aborted) return "Operation aborted";
 			const policy = resolvePolicyForChat(chatId);
 			const { roots, notices, multiRoot } = sourceSearchRoots(input.path, policy);
+			const rootEntries: Array<{ root: string; isDirectory: boolean }> = [];
 			for (const root of roots) {
 				let stat;
 				try { stat = await fs.stat(root); }
 				catch { throw new Error(`Path not found: ${root}`); }
-				if (!stat.isDirectory()) throw new Error(`Not a directory: ${root}`);
+				const isDirectory = stat.isDirectory();
+				if (!isDirectory && !multiRoot) throw new Error(`Not a directory: ${root}`);
+				if (isDirectory || stat.isFile()) rootEntries.push({ root, isDirectory });
 			}
 			const effectiveLimit = input.limit ?? DEFAULT_LIMIT;
 			const matches: string[] = [];
@@ -38,7 +41,16 @@ export function createFindTool(chatId?: string): AgentTool<typeof findInput> {
 			let limitReached = false;
 			let timedOut = false;
 			let aborted = false;
-			for (const root of roots) {
+			for (const { root, isDirectory } of rootEntries) {
+				if (ctx?.signal?.aborted) { aborted = true; break; }
+				if (Date.now() > deadline) { timedOut = true; break; }
+				if (!isDirectory) {
+					if (matchGlob(path.basename(root), input.pattern)) {
+						if (matches.length >= effectiveLimit) { limitReached = true; break; }
+						matches.push(root);
+					}
+					continue;
+				}
 				const result = await walkFiles(root, (filePath) => {
 					const rel = path.relative(root, filePath).split(path.sep).join("/");
 					if (!matchGlob(rel, input.pattern)) return false;

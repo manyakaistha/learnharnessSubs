@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { CourseAction, CourseFilter, CourseState, CoursesView } from "../core/contracts/courses.ts";
+import { COURSE_FILES_DIR } from "../../config.ts";
+import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE } from "../../lib/notes-import-limits.ts";
+import type { CourseAction, CourseFilesResponse, CourseFilter, CourseFolder, CourseState, CoursesView } from "../core/contracts/courses.ts";
 import type { SourceDirectory } from "../core/source-organization.ts";
 import { isWithin } from "../agent/tools/file-access.ts";
-import { applyCourseAction, courseClosure, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
+import { isProtectedSourcePath, isSensitivePath } from "../agent/tools/fs-shared.ts";
+import { applyCourseAction, courseClosure, courseOf, ownSourcesOf, parseCourseAction, sourceInFilter } from "../core/courses.ts";
 import { emit } from "../core/events.ts";
 import { courseFileStatuses, courseScanning, forgetCourseStatuses, startCourseScan } from "./course-sources.ts";
 import { deleteSources, SourceDeletionError } from "./source-deletion.ts";
@@ -13,13 +17,17 @@ import { sourceDirectory } from "./source-organization.ts";
 import { stores } from "./stores.ts";
 
 export class CourseInputError extends Error {}
+export class CoursePayloadTooLargeError extends Error {}
 export class UnknownCourseError extends Error {}
 
+function expandHomePath(rawPath: string, home: string = os.homedir()): string {
+	if (rawPath === "~") return home;
+	if (rawPath.startsWith("~/") || rawPath.startsWith(`~${path.sep}`)) return path.join(home, rawPath.slice(2));
+	return rawPath;
+}
+
 function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): string {
-	let expanded: string;
-	if (rawPath === "~") expanded = home;
-	else if (rawPath.startsWith("~/")) expanded = path.join(home, rawPath.slice(2));
-	else expanded = rawPath;
+	const expanded = expandHomePath(rawPath, home);
 	if (!path.isAbsolute(expanded)) throw new CourseInputError("Folder path must be an absolute path.");
 	const normalized = path.resolve(expanded);
 	let stat: fs.Stats;
@@ -29,6 +37,31 @@ function resolveCourseFolderPath(rawPath: string, home: string = os.homedir()): 
 		throw new CourseInputError("Folder does not exist on this machine.");
 	}
 	if (!stat.isDirectory()) throw new CourseInputError("Folder path must point to a directory.");
+	return normalized;
+}
+
+function resolveSessionFilePath(rawPath: string, home: string = os.homedir()): string {
+	const expanded = expandHomePath(rawPath, home);
+	if (expanded.includes("\0") || !path.isAbsolute(expanded)) {
+		throw new CourseInputError("File path must be an absolute path.");
+	}
+	const normalized = path.resolve(expanded);
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(/* turbopackIgnore: true */ normalized);
+	} catch {
+		throw new CourseInputError("File does not exist on this machine.");
+	}
+	if (!stat.isFile()) throw new CourseInputError("File path must point to a regular file.");
+	let real: string;
+	try {
+		real = fs.realpathSync.native(/* turbopackIgnore: true */ normalized);
+	} catch {
+		throw new CourseInputError("File does not exist on this machine.");
+	}
+	if (isSensitivePath(normalized) || isSensitivePath(real) || isProtectedSourcePath(normalized)) {
+		throw new CourseInputError("File path points to a protected location.");
+	}
 	return normalized;
 }
 
@@ -110,13 +143,34 @@ export function mutateCourses(raw: unknown): CoursesView {
 		action = { ...action, path: folderPath };
 	}
 
+	if (action.action === "attach-session-files") {
+		if (!stores.chatStore.getChat(action.chatId)) {
+			throw new CourseInputError("Session no longer exists.");
+		}
+		const chatCourseId = courseOf(state, action.chatId);
+		if (!chatCourseId || !state.courses.some((c) => c.id === chatCourseId)) {
+			throw new CourseInputError("Session does not belong to a course.");
+		}
+		action = { ...action, paths: [...new Set(action.paths.map((p) => resolveSessionFilePath(p)))] };
+	}
+
+	if (action.action === "include-file") {
+		const expanded = expandHomePath(action.path);
+		if (!Object.hasOwn(state.folderFiles, action.path) && path.isAbsolute(expanded)) {
+			action = { ...action, path: path.resolve(expanded) };
+		}
+	}
+
+	let deletedManagedFolders: readonly CourseFolder[] = [];
 	if (action.action === "delete") {
 		const targetId = action.id;
-		if (!state.courses.some((c) => c.id === targetId)) throw new CourseInputError("Course no longer exists.");
+		const targetCourse = state.courses.find((c) => c.id === targetId);
+		if (!targetCourse) throw new CourseInputError("Course no longer exists.");
 		if (action.mode === "delete-sources" && courseScanning(targetId)) {
 			throw new SourceDeletionError("This course is still extracting its folders. Wait for it to finish, then delete.", 409, "extraction_running");
 		}
 		if (action.mode === "delete-sources") {
+			deletedManagedFolders = targetCourse.folders.filter((f) => f.managed);
 			const ownSources = ownSourcesOf(state, targetId);
 			if (ownSources.length > 0) {
 				deleteSources({ sourceIds: ownSources, folderIds: [], deleteSessions: true });
@@ -140,13 +194,187 @@ export function mutateCourses(raw: unknown): CoursesView {
 	}
 
 	stores.courseStore.write(next);
-	if (action.action === "delete") forgetCourseStatuses(action.id);
-	if (action.action === "add-folder") startCourseScan(action.id);
+	if (action.action === "delete") {
+		if (action.mode === "delete-sources") removeManagedCourseFolders(deletedManagedFolders);
+		forgetCourseStatuses(action.id);
+	}
+	if (action.action === "add-folder" || action.action === "include-file") startCourseScan(action.id);
 	return buildCoursesView(next);
 }
 
-/** Drop membership and folderFiles entries pointing at deleted sources so
- * courses.json never references vanished chats or notes files. */
+function removeManagedCourseFolders(folders: readonly CourseFolder[]): void {
+	if (folders.length === 0) return;
+	const managedRoot = path.resolve(COURSE_FILES_DIR);
+	let realRoot: string;
+	try {
+		realRoot = fs.realpathSync.native(/* turbopackIgnore: true */ managedRoot);
+	} catch {
+		return;
+	}
+	for (const folder of folders) {
+		if (!folder.managed) continue;
+		const lexical = path.resolve(folder.path);
+		if (lexical === managedRoot || !isWithin(lexical, managedRoot)) continue;
+		let lstat: fs.Stats;
+		try {
+			lstat = fs.lstatSync(/* turbopackIgnore: true */ lexical);
+		} catch {
+			continue;
+		}
+		if (lstat.isSymbolicLink()) continue;
+		let realTarget: string;
+		try {
+			realTarget = fs.realpathSync.native(/* turbopackIgnore: true */ lexical);
+		} catch {
+			continue;
+		}
+		if (realTarget === realRoot || !isWithin(realTarget, realRoot)) continue;
+		fs.rmSync(/* turbopackIgnore: true */ realTarget, { recursive: true, force: true });
+	}
+}
+
+const MAX_UPLOAD_FILENAME_BYTES = 240;
+
+function sanitizeUploadFilename(rawName: string): string {
+	if (typeof rawName !== "string" || !rawName.trim()) {
+		throw new CourseInputError("File name must be a non-empty string.");
+	}
+	if (/[\x00-\x1f\x7f]/.test(rawName)) {
+		throw new CourseInputError("File name contains invalid control characters.");
+	}
+	if (rawName.includes("/") || rawName.includes("\\") || (process.platform === "win32" && rawName.includes(":"))) {
+		throw new CourseInputError("File name must not contain path separators.");
+	}
+	const base = path.basename(rawName);
+	if (!base || base === "." || base === ".." || base !== rawName || base.startsWith(".")) {
+		throw new CourseInputError("Invalid file name.");
+	}
+	if (Buffer.byteLength(base, "utf8") > MAX_UPLOAD_FILENAME_BYTES) {
+		throw new CourseInputError("File name is too long.");
+	}
+	return base;
+}
+
+function oversizeUploadMessage(): string {
+	return `File is too large (max ${Math.round(MAX_IMPORT_BYTES / (1024 * 1024))} MB).`;
+}
+
+async function writeUniqueCourseFile(dir: string, filename: string, bytes: Uint8Array): Promise<string> {
+	const ext = path.extname(filename);
+	const stem = filename.slice(0, filename.length - ext.length);
+	for (let n = 1; ; n++) {
+		const candidateName = n === 1 ? filename : `${stem} (${n})${ext}`;
+		const targetPath = path.join(/* turbopackIgnore: true */ dir, candidateName);
+		try {
+			await fsPromises.writeFile(/* turbopackIgnore: true */ targetPath, bytes, { flag: "wx" });
+			return targetPath;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+			throw err;
+		}
+	}
+}
+
+export interface AddCourseFilesInput {
+	courseId: string;
+	files: readonly File[];
+	chatId?: string | null;
+}
+
+/** Copy uploaded files into `<data>/course-files/<courseId>/`, attach the
+ * managed folder on first use, optionally grant session access, and scan. */
+export async function addCourseFiles(input: AddCourseFilesInput): Promise<CourseFilesResponse> {
+	const courseId = input.courseId.trim();
+	if (!courseId || courseId === "." || courseId === ".." || courseId.includes("/") || courseId.includes("\\") || courseId.includes("\0")) {
+		throw new CourseInputError("Course ID must be a non-empty string.");
+	}
+	const initialState = stores.courseStore.read();
+	if (!initialState.courses.some((c) => c.id === courseId)) {
+		throw new CourseInputError("Course not found.");
+	}
+	const managedRoot = path.resolve(COURSE_FILES_DIR);
+	const managedDir = path.resolve(path.join(/* turbopackIgnore: true */ managedRoot, courseId));
+	if (managedDir === managedRoot || !isWithin(managedDir, managedRoot)) {
+		throw new CourseInputError("Invalid course ID.");
+	}
+
+	const rawChatId = input.chatId?.trim() ?? "";
+	const chatId = rawChatId || undefined;
+	if (chatId === "__proto__" || chatId === "constructor" || chatId === "prototype") {
+		throw new CourseInputError("Invalid chat ID.");
+	}
+	if (input.files.length === 0) {
+		throw new CourseInputError("Select at least one file.");
+	}
+
+	const entries: Array<{ filename: string; bytes: Uint8Array }> = [];
+	for (const file of input.files) {
+		const filename = sanitizeUploadFilename(file.name);
+		if (!IMPORT_EXTENSIONS.test(filename)) {
+			throw new CourseInputError(UNSUPPORTED_TYPE_MESSAGE);
+		}
+		if (isSensitivePath(path.join(/* turbopackIgnore: true */ managedDir, filename))) {
+			throw new CourseInputError("File name is not allowed.");
+		}
+		if (file.size > MAX_IMPORT_BYTES) {
+			throw new CoursePayloadTooLargeError(oversizeUploadMessage());
+		}
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		if (bytes.byteLength > MAX_IMPORT_BYTES) {
+			throw new CoursePayloadTooLargeError(oversizeUploadMessage());
+		}
+		entries.push({ filename, bytes });
+	}
+
+	if (!stores.courseStore.read().courses.some((c) => c.id === courseId)) {
+		throw new CourseInputError("Course no longer exists.");
+	}
+	await fsPromises.mkdir(/* turbopackIgnore: true */ managedDir, { recursive: true });
+
+	const copied: string[] = [];
+	try {
+		for (const { filename, bytes } of entries) {
+			copied.push(await writeUniqueCourseFile(managedDir, filename, bytes));
+		}
+
+		const state = stores.courseStore.read();
+		const course = state.courses.find((c) => c.id === courseId);
+		if (!course) throw new CourseInputError("Course no longer exists.");
+
+		let next = state;
+		if (!course.folders.some((f) => f.path === managedDir)) {
+			next = applyCourseAction(next, { action: "add-folder", id: courseId, path: managedDir }, {
+				id: `cfld_${randomUUID()}`,
+				at: new Date().toISOString(),
+			});
+			const addedCourse = next.courses.find((c) => c.id === courseId)!;
+			const addedFolder = addedCourse.folders.find((f) => f.path === managedDir)!;
+			addedFolder.managed = true;
+		}
+
+		if (chatId && stores.chatStore.getChat(chatId) && courseOf(next, chatId) === courseId) {
+			next = applyCourseAction(next, { action: "attach-session-files", chatId, paths: copied }, {
+				id: "",
+				at: new Date().toISOString(),
+			});
+		}
+
+		if (next !== state) {
+			stores.courseStore.write(next);
+		}
+		startCourseScan(courseId);
+		return { ...buildCoursesView(next), copied };
+	} catch (error) {
+		for (const p of copied) {
+			await fsPromises.rm(/* turbopackIgnore: true */ p, { force: true }).catch(() => undefined);
+		}
+		throw error;
+	}
+}
+
+/** Drop membership and sessionFiles for deleted sources, and mark deleted
+ * folder-file entries `excluded: true` (keeping sha256) so scans skip them
+ * until re-included via `include-file`. */
 export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 	if (sourceIds.size === 0) return;
 	const state = stores.courseStore.read();
@@ -157,10 +385,14 @@ export function removeSourcesFromCourses(sourceIds: ReadonlySet<string>): void {
 			delete next.membership[id];
 			changed = true;
 		}
+		if (Object.hasOwn(next.sessionFiles, id)) {
+			delete next.sessionFiles[id];
+			changed = true;
+		}
 	}
-	for (const [filePath, rec] of Object.entries(next.folderFiles)) {
-		if (sourceIds.has(rec.sourceId)) {
-			delete next.folderFiles[filePath];
+	for (const rec of Object.values(next.folderFiles)) {
+		if (sourceIds.has(rec.sourceId) && !rec.excluded) {
+			rec.excluded = true;
 			changed = true;
 		}
 	}

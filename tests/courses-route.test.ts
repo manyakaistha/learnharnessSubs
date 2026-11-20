@@ -11,14 +11,18 @@ fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 const coursesRoute = await import("../app/api/courses/route.ts");
+const courseFilesRoute = await import("../app/api/courses/files/route.ts");
 const chatsRoute = await import("../app/api/chats/route.ts");
 const chatByIdRoute = await import("../app/api/chats/[id]/route.ts");
 const graphRoute = await import("../app/api/graph/route.ts");
 const sourcesRoute = await import("../app/api/graph/sources/route.ts");
 const { stores } = await import("../src/server/stores.ts");
-const { COURSES_FILE } = await import("../config.ts");
+const { courseFileSourceId, setCourseExtractorForTests, waitForCourseScanForTests } = await import("../src/server/course-sources.ts");
+const { COURSE_FILES_DIR, COURSES_FILE } = await import("../config.ts");
+const { MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES } = await import("../lib/notes-import-limits.ts");
 
 beforeEach(() => {
+	setCourseExtractorForTests(null);
 	fs.rmSync(root, { recursive: true, force: true });
 	fs.mkdirSync(root, { recursive: true });
 	fs.writeFileSync(process.env.LH_AUTH_FILE!, "{}\n");
@@ -338,7 +342,7 @@ it("GET /api/graph and GET /api/graph/sources support ?course=<id>, ?course=none
 	assert.equal((await sourcesRoute.GET(new Request("http://localhost/api/graph/sources?course=crs_unknown"))).status, 404);
 });
 
-it("source deletion removes membership and folderFiles entries from courses.json", async () => {
+it("source deletion removes membership and marks folderFiles entries excluded in courses.json", async () => {
 	const cId = (await (await postCourse({ action: "create", name: "Physics" })).json()).courses[0].id as string;
 	const chatKeep = stores.chatStore.createChat("Keep chat");
 	const chatDrop = stores.chatStore.createChat("Drop chat");
@@ -347,6 +351,11 @@ it("source deletion removes membership and folderFiles entries from courses.json
 
 	for (const id of [chatKeep.id, chatDrop.id, chatRouteDel.id, "src_file1"]) {
 		await postCourse({ action: "assign", sourceId: id, courseId: cId });
+	}
+	const attachedSessionFile = path.join(root, "session-attached.md");
+	fs.writeFileSync(attachedSessionFile, "# Attached");
+	for (const id of [chatKeep.id, chatDrop.id, chatRouteDel.id]) {
+		await postCourse({ action: "attach-session-files", chatId: id, paths: [attachedSessionFile] });
 	}
 	const stateWithFolderFile = stores.courseStore.read();
 	stateWithFolderFile.folderFiles["/tmp/file1.md"] = {
@@ -388,7 +397,17 @@ it("source deletion removes membership and folderFiles entries from courses.json
 	assert.equal(afterState.membership[chatDrop.id], undefined);
 	assert.equal(afterState.membership[chatRouteDel.id], undefined);
 	assert.equal(afterState.membership[chatKeep.id], cId);
-	assert.deepEqual(afterState.folderFiles, {});
+	assert.equal(afterState.sessionFiles[chatDrop.id], undefined);
+	assert.equal(afterState.sessionFiles[chatRouteDel.id], undefined);
+	assert.deepEqual(afterState.sessionFiles[chatKeep.id], [path.resolve(attachedSessionFile)]);
+	assert.deepEqual(afterState.folderFiles["/tmp/file1.md"], {
+		courseId: cId,
+		folderId: "cfld_1",
+		sourceId: "src_file1",
+		sha256: "abc",
+		extractedAt: "2026-11-20T00:00:00Z",
+		excluded: true,
+	});
 });
 
 it("malformed, oversized bodies return 400 and corrupt courses.json returns 500 without overwriting", async () => {
@@ -412,4 +431,293 @@ it("malformed, oversized bodies return 400 and corrupt courses.json returns 500 
 	} finally {
 		fs.writeFileSync(COURSES_FILE, before);
 	}
+});
+
+it("attach-session-files validates course membership, regular files, ~ expansion, and sensitivity", async () => {
+	const courseId = (await (await postCourse({ action: "create", name: "Systems" })).json()).courses[0].id as string;
+	const courseChat = stores.chatStore.createChat("In course");
+	const freeChat = stores.chatStore.createChat("No course");
+	await postCourse({ action: "assign", sourceId: courseChat.id, courseId });
+
+	const dir = path.join(root, "attach-dir");
+	fs.mkdirSync(dir, { recursive: true });
+	const okFile = path.join(dir, "lecture.md");
+	fs.writeFileSync(okFile, "# Lecture");
+	const envFile = path.join(dir, ".env");
+	fs.writeFileSync(envFile, "SECRET=1");
+	const symlinkToAuth = path.join(dir, "alias.txt");
+	fs.symlinkSync(process.env.LH_AUTH_FILE!, symlinkToAuth);
+
+	// Unknown chat and non-course chat -> 400
+	assert.equal((await postCourse({ action: "attach-session-files", chatId: "chat_missing", paths: [okFile] })).status, 400);
+	assert.equal((await postCourse({ action: "attach-session-files", chatId: freeChat.id, paths: [okFile] })).status, 400);
+
+	// Empty paths, relative, missing, dir, sensitive (.env, auth file, symlink to auth) -> 400
+	for (const badPaths of [
+		[],
+		["relative/lecture.md"],
+		[path.join(dir, "missing.md")],
+		[dir],
+		[envFile],
+		[process.env.LH_AUTH_FILE!],
+		[symlinkToAuth],
+	]) {
+		assert.equal((await postCourse({ action: "attach-session-files", chatId: courseChat.id, paths: badPaths })).status, 400, JSON.stringify(badPaths));
+	}
+
+	// Unnormalized absolute path and ~ expansion normalize and store
+	const homeDir = path.join(root, "fake-home");
+	const homeFile = path.join(homeDir, "notes", "handout.txt");
+	fs.mkdirSync(path.dirname(homeFile), { recursive: true });
+	fs.writeFileSync(homeFile, "Handout");
+	const prevHome = process.env.HOME;
+	const prevProfile = process.env.USERPROFILE;
+	process.env.HOME = homeDir;
+	process.env.USERPROFILE = homeDir;
+	try {
+		const res = await postCourse({
+			action: "attach-session-files",
+			chatId: courseChat.id,
+			paths: [path.join(dir, "..", "attach-dir", "lecture.md"), "~/notes/handout.txt"],
+		});
+		assert.equal(res.status, 200);
+		assert.deepEqual(stores.courseStore.read().sessionFiles[courseChat.id], [
+			path.resolve(okFile),
+			path.resolve(homeFile),
+		]);
+	} finally {
+		if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+		if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+	}
+});
+
+it("POST /api/courses/files copies with clash suffixes, attaches managed folder once, scans, grants chatId, and rejects bad inputs", async () => {
+	const courseId = (await (await postCourse({ action: "create", name: "ML" })).json()).courses[0].id as string;
+	const otherCourseId = (await (await postCourse({ action: "create", name: "Other" })).json()).courses.find((c: { name: string }) => c.name === "Other").id as string;
+	const chatMl = stores.chatStore.createChat("ML session");
+	const chatOther = stores.chatStore.createChat("Other session");
+	await postCourse({ action: "assign", sourceId: chatMl.id, courseId });
+	await postCourse({ action: "assign", sourceId: chatOther.id, courseId: otherCourseId });
+
+	const extracted: Array<{ sourceId: string; filePath: string; text: string }> = [];
+	setCourseExtractorForTests(async (input) => {
+		extracted.push(input);
+		return { nodes: 1, chains: 0 };
+	});
+
+	const uploadFiles = (fields: { courseId?: string; chatId?: string; files: Array<{ name: string; body: Uint8Array<ArrayBuffer> | string }> }) => {
+		const form = new FormData();
+		if (fields.courseId !== undefined) form.append("courseId", fields.courseId);
+		if (fields.chatId !== undefined) form.append("chatId", fields.chatId);
+		for (const f of fields.files) form.append("files", new File([f.body], f.name));
+		return courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	};
+
+	// First upload creates managed folder, attaches it once with managed: true, copies files, grants chatId, starts scan
+	const res1 = await uploadFiles({
+		courseId,
+		chatId: chatMl.id,
+		files: [
+			{ name: "week1.md", body: "# Week 1" },
+			{ name: "week1.md", body: "# Week 1 duplicate" },
+		],
+	});
+	assert.equal(res1.status, 200);
+	const body1 = await res1.json();
+	const expectedDir = path.join(COURSE_FILES_DIR, courseId);
+	assert.deepEqual(body1.copied, [
+		path.join(expectedDir, "week1.md"),
+		path.join(expectedDir, "week1 (2).md"),
+	]);
+	const mlCourse1 = body1.courses.find((c: { id: string }) => c.id === courseId);
+	assert.equal(mlCourse1.folders.length, 1);
+	assert.equal(mlCourse1.folders[0].path, expectedDir);
+	assert.equal(mlCourse1.folders[0].managed, true);
+	assert.equal(mlCourse1.scanning, true);
+	assert.equal(fs.readFileSync(path.join(expectedDir, "week1.md"), "utf8"), "# Week 1");
+	assert.equal(fs.readFileSync(path.join(expectedDir, "week1 (2).md"), "utf8"), "# Week 1 duplicate");
+	assert.deepEqual(stores.courseStore.read().sessionFiles[chatMl.id], body1.copied);
+
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(
+		extracted.map((e) => e.filePath).sort(),
+		[`${courseId}/week1 (2).md`, `${courseId}/week1.md`],
+	);
+
+	// Second upload reuses existing managed folder (still 1 folder), increments clash suffix, ignores non-course chatId
+	const res2 = await uploadFiles({
+		courseId,
+		chatId: chatOther.id,
+		files: [{ name: "week1.md", body: "# Week 1 v3" }],
+	});
+	assert.equal(res2.status, 200);
+	const body2 = await res2.json();
+	assert.deepEqual(body2.copied, [path.join(expectedDir, "week1 (3).md")]);
+	assert.equal(body2.courses.find((c: { id: string }) => c.id === courseId).folders.length, 1);
+	assert.equal(stores.courseStore.read().sessionFiles[chatOther.id], undefined);
+	await waitForCourseScanForTests(courseId);
+
+	// Validation errors: missing/unknown courseId, no files, bad filenames, unsupported types, oversize
+	assert.equal((await uploadFiles({ files: [{ name: "a.md", body: "hi" }] })).status, 400);
+	assert.equal((await uploadFiles({ courseId: "crs_missing", files: [{ name: "a.md", body: "hi" }] })).status, 400);
+	assert.equal((await uploadFiles({ courseId, files: [] })).status, 400);
+	for (const badName of ["", ".", "..", "sub/a.md", "../a.md", "a\\b.md", "a\0b.md", ".env.md", ".hidden.md", "slides.pptx", "img.png"]) {
+		const badRes = await uploadFiles({ courseId, files: [{ name: badName, body: "hi" }] });
+		assert.equal(badRes.status, 400, `expected 400 for filename ${JSON.stringify(badName)}`);
+	}
+
+	// Single file > MAX_IMPORT_BYTES -> 413
+	const hugeFileRes = await uploadFiles({
+		courseId,
+		files: [{ name: "huge.md", body: new Uint8Array(MAX_IMPORT_BYTES + 1) }],
+	});
+	assert.equal(hugeFileRes.status, 413);
+
+	// Streamed body > MAX_IMPORT_BODY_BYTES -> 413
+	let cancelled = false;
+	const hugeStreamReq = new Request("http://localhost/api/courses/files", {
+		method: "POST",
+		duplex: "half",
+		headers: { "content-type": "multipart/form-data; boundary=test", "content-length": "1" },
+		body: new ReadableStream<Uint8Array>({
+			pull(controller) { controller.enqueue(new Uint8Array(1024 * 1024)); },
+			cancel() { cancelled = true; },
+		}, { highWaterMark: 0 }),
+	} as RequestInit);
+	const streamRes = await courseFilesRoute.POST(hugeStreamReq);
+	assert.equal(streamRes.status, 413);
+	assert.equal(cancelled, true);
+	// No partial files left behind from failed uploads
+	assert.deepEqual(fs.readdirSync(expectedDir).sort(), ["week1 (2).md", "week1 (3).md", "week1.md"]);
+});
+
+it("deleting a course-folder source excludes it across rescans until include-file re-extracts it", async () => {
+	const folderDir = path.join(root, "excl-folder");
+	fs.mkdirSync(folderDir, { recursive: true });
+	const fileA = path.join(folderDir, "a.md");
+	const fileB = path.join(folderDir, "b.md");
+	fs.writeFileSync(fileA, "# A v1");
+	fs.writeFileSync(fileB, "# B v1");
+
+	const calls: string[] = [];
+	setCourseExtractorForTests(async ({ sourceId, filePath }) => {
+		calls.push(filePath);
+		stores.graphStore.upsertSource({ id: sourceId, filePath, importedAt: "2026-11-20T00:00:00Z" });
+		return { nodes: 1, chains: 0 };
+	});
+
+	const created = await (await postCourse({ action: "create", name: "Bio" })).json();
+	const courseId = created.courses[0].id as string;
+	await postCourse({ action: "add-folder", id: courseId, path: folderDir });
+	await waitForCourseScanForTests(courseId);
+	assert.equal(calls.length, 2);
+
+	const srcA = courseFileSourceId(fileA);
+	const prevSha = stores.courseStore.read().folderFiles[fileA]?.sha256;
+	assert.ok(prevSha);
+
+	// Delete srcA via source deletion -> membership removed, folderFiles marked excluded (sha256 kept)
+	const delRes = await sourcesRoute.DELETE(
+		new Request("http://localhost/api/graph/sources", {
+			method: "DELETE",
+			body: JSON.stringify({ sourceIds: [srcA], folderIds: [], deleteSessions: false }),
+		}),
+	);
+	assert.equal(delRes.status, 200);
+
+	const stateAfterDel = stores.courseStore.read();
+	assert.equal(stateAfterDel.membership[srcA], undefined);
+	assert.equal(stateAfterDel.folderFiles[fileA]?.excluded, true);
+	assert.equal(stateAfterDel.folderFiles[fileA]?.sha256, prevSha);
+
+	const viewAfterDel = await (await coursesRoute.GET()).json();
+	const bioFilesAfterDel = viewAfterDel.courses.find((c: { id: string }) => c.id === courseId).files;
+	assert.equal(bioFilesAfterDel.find((f: { path: string }) => f.path === fileA)?.state, "excluded");
+	assert.equal(bioFilesAfterDel.find((f: { path: string }) => f.path === fileB)?.state, "extracted");
+
+	// Modify fileA and rescan -> excluded file is skipped
+	calls.length = 0;
+	fs.writeFileSync(fileA, "# A v2 modified");
+	await postCourse({ action: "rescan", id: courseId });
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(calls, []);
+	const viewAfterScan = await (await coursesRoute.GET()).json();
+	assert.equal(viewAfterScan.courses[0].files.find((f: { path: string }) => f.path === fileA)?.state, "excluded");
+
+	// include-file on non-excluded file -> 400
+	assert.equal((await postCourse({ action: "include-file", id: courseId, path: fileB })).status, 400);
+
+	// include-file on excluded file -> clears exclusion and starts scan -> re-extracts
+	const incRes = await postCourse({ action: "include-file", id: courseId, path: fileA });
+	assert.equal(incRes.status, 200);
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(calls, ["excl-folder/a.md"]);
+	const finalView = await (await coursesRoute.GET()).json();
+	assert.equal(finalView.courses[0].files.find((f: { path: string }) => f.path === fileA)?.state, "extracted");
+	assert.equal(finalView.membership[srcA], courseId);
+	assert.equal(stores.courseStore.read().folderFiles[fileA]?.excluded, undefined);
+});
+
+it("course delete removes managed folder on delete-sources (with containment) and keeps it on ungroup", async () => {
+	setCourseExtractorForTests(async ({ sourceId, filePath }) => {
+		stores.graphStore.upsertSource({ id: sourceId, filePath, importedAt: "2026-11-20T00:00:00Z" });
+		return { nodes: 1, chains: 0 };
+	});
+
+	const uploadOne = (courseId: string, name: string, body: string) => {
+		const form = new FormData();
+		form.append("courseId", courseId);
+		form.append("files", new File([body], name));
+		return courseFilesRoute.POST(new Request("http://localhost/api/courses/files", { method: "POST", body: form }));
+	};
+
+	// Course 1: ungroup keeps managed copies and chat sessionFiles on disk
+	const c1 = (await (await postCourse({ action: "create", name: "KeepCopies" })).json()).courses[0].id as string;
+	const chat1 = stores.chatStore.createChat("Kept session");
+	await postCourse({ action: "assign", sourceId: chat1.id, courseId: c1 });
+	const up1 = await (await uploadOne(c1, "kept.md", "# kept")).json();
+	const copied1 = up1.copied[0] as string;
+	await postCourse({ action: "attach-session-files", chatId: chat1.id, paths: [copied1] });
+	await waitForCourseScanForTests(c1);
+
+	const delUngroup = await postCourse({ action: "delete", id: c1, mode: "ungroup" });
+	assert.equal(delUngroup.status, 200);
+	assert.equal(fs.existsSync(copied1), true);
+	assert.equal(stores.graphStore.readSources().some((s) => s.id === courseFileSourceId(copied1)), true);
+	assert.deepEqual(stores.courseStore.read().sessionFiles[chat1.id], [copied1]);
+
+	// Course 2: delete-sources removes managed folder inside COURSE_FILES_DIR, never user folders or outside paths
+	const c2 = (await (await postCourse({ action: "create", name: "RemoveCopies" })).json()).courses[0].id as string;
+	const extDir = path.join(root, "user-external");
+	fs.mkdirSync(extDir, { recursive: true });
+	const extFile = path.join(extDir, "orig.md");
+	fs.writeFileSync(extFile, "# external");
+	await postCourse({ action: "add-folder", id: c2, path: extDir });
+	await waitForCourseScanForTests(c2);
+
+	const up2 = await (await uploadOne(c2, "managed.md", "# managed")).json();
+	const copied2 = up2.copied[0] as string;
+	const managedDir2 = path.join(COURSE_FILES_DIR, c2);
+	await waitForCourseScanForTests(c2);
+
+	// Inject a rogue managed: true folder outside COURSE_FILES_DIR to test containment guard
+	const outsideProtected = path.join(root, "outside-managed-guard");
+	fs.mkdirSync(outsideProtected, { recursive: true });
+	const outsideFile = path.join(outsideProtected, "keep.md");
+	fs.writeFileSync(outsideFile, "do not delete");
+	const tampered = stores.courseStore.read();
+	tampered.courses.find((c) => c.id === c2)!.folders.push({
+		id: "cfld_rogue",
+		path: outsideProtected,
+		addedAt: "2026-11-20T00:00:00Z",
+		managed: true,
+	});
+	stores.courseStore.write(tampered);
+
+	const delPurge = await postCourse({ action: "delete", id: c2, mode: "delete-sources" });
+	assert.equal(delPurge.status, 200);
+	assert.equal(fs.existsSync(managedDir2), false);
+	assert.equal(fs.existsSync(extFile), true, "user-attached external folder must never be deleted");
+	assert.equal(fs.existsSync(outsideFile), true, "containment guard must protect paths outside COURSE_FILES_DIR");
+	assert.equal(stores.graphStore.readSources().some((s) => s.id === courseFileSourceId(copied2)), false);
 });

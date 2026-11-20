@@ -30,6 +30,15 @@ export function fileAccessPolicy(chatId?: string): FileAccessPolicy {
 					try { folders.push(expandFolder(folder.path)); }
 					catch { return { restricted: true, folders: [], error: `Invalid course folder path: ${folder.path}` }; }
 				}
+				const sessionPaths = Object.hasOwn(state.sessionFiles, chatId) ? state.sessionFiles[chatId]! : [];
+				for (const filePath of sessionPaths) {
+					try {
+						const expanded = expandFolder(filePath);
+						if (!folders.includes(expanded)) folders.push(expanded);
+					} catch {
+						return { restricted: true, folders: [], error: `Invalid session file path: ${filePath}` };
+					}
+				}
 				return { restricted: true, folders };
 			}
 		}

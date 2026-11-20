@@ -21,6 +21,7 @@ const {
 	courseFileSourceId,
 	courseFileStatuses,
 	courseScanning,
+	forgetCourseStatuses,
 	setCourseExtractorForTests,
 	startCourseScan,
 	waitForCourseScanForTests,
@@ -335,4 +336,44 @@ it("a scan requested while one runs triggers exactly one follow-up pass", async 
 	await waitForCourseScanForTests(courseId);
 	assert.deepEqual(seen, ["pending-course/a.md", "pending-course/b.md"]);
 	assert.equal(courseScanning(courseId), false);
+});
+
+it("excluded files report state 'excluded' even when not scanning and are skipped by scans", async () => {
+	const folder = path.join(root, "excluded-course");
+	const f1 = writeText(path.join(folder, "keep.md"), "# keep");
+	const f2 = writeText(path.join(folder, "skip.md"), "# skip v1");
+	const { courseId, folderId } = createCourseWithFolder("Excl", folder);
+
+	const state = stores.courseStore.read();
+	state.folderFiles[f1] = {
+		courseId,
+		folderId,
+		sourceId: courseFileSourceId(f1),
+		sha256: sha256(fs.readFileSync(f1)),
+		extractedAt: "2026-11-20T00:00:00Z",
+	};
+	state.folderFiles[f2] = {
+		courseId,
+		folderId,
+		sourceId: courseFileSourceId(f2),
+		sha256: sha256(fs.readFileSync(f2)),
+		extractedAt: "2026-11-20T00:00:00Z",
+		excluded: true,
+	};
+	stores.courseStore.write(state);
+	forgetCourseStatuses(courseId);
+
+	// Before any scan (uncached fallback), excluded is reported accurately
+	const uncached = courseFileStatuses(courseId);
+	assert.deepEqual(uncached.find((s) => s.path === f1), { path: f1, folderId, state: "extracted" });
+	assert.deepEqual(uncached.find((s) => s.path === f2), { path: f2, folderId, state: "excluded" });
+
+	// Scan skips f2 even after editing it on disk
+	writeText(f2, "# skip v2");
+	const seen: string[] = [];
+	setCourseExtractorForTests(async ({ filePath }) => { seen.push(filePath); return { nodes: 1, chains: 0 }; });
+	startCourseScan(courseId);
+	await waitForCourseScanForTests(courseId);
+	assert.deepEqual(seen, []);
+	assert.deepEqual(courseFileStatuses(courseId).find((s) => s.path === f2), { path: f2, folderId, state: "excluded" });
 });

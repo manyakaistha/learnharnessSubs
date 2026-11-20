@@ -227,6 +227,12 @@ async function runCourseScan(courseId: string): Promise<void> {
 
 		for (const file of discovered) {
 			if (!activeFolderIds.has(file.folder.id)) continue;
+			const currentFiles = stores.courseStore.read().folderFiles;
+			const currentRec = Object.hasOwn(currentFiles, file.absPath) ? currentFiles[file.absPath] : undefined;
+			if (currentRec && currentRec.courseId === courseId && currentRec.excluded) {
+				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "excluded" });
+				continue;
+			}
 			if (file.size > MAX_IMPORT_BYTES) {
 				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "failed", error: oversizeMessage() });
 				continue;
@@ -250,8 +256,11 @@ async function runCourseScan(courseId: string): Promise<void> {
 			}
 
 			const sha256 = createHash("sha256").update(bytes).digest("hex");
-			const recorded = stores.courseStore.read().folderFiles[file.absPath];
-			if (recorded && recorded.sha256 === sha256 && recorded.courseId === courseId) {
+			const latestFiles = stores.courseStore.read().folderFiles;
+			const recorded = Object.hasOwn(latestFiles, file.absPath) ? latestFiles[file.absPath] : undefined;
+			if (recorded && recorded.courseId === courseId && recorded.excluded) {
+				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "excluded" });
+			} else if (recorded && recorded.sha256 === sha256 && recorded.courseId === courseId) {
 				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "extracted" });
 			} else {
 				statuses.push({ path: file.absPath, folderId: file.folder.id, state: "queued" });
@@ -423,17 +432,29 @@ export function courseFileStatuses(courseId: string): CourseFileStatus[] {
 	const folderIds = new Set(course.folders.map((f) => f.id));
 	const cached = runtime().statuses.get(courseId);
 	if (cached) {
-		// A source deleted elsewhere drops out of folderFiles; never keep
-		// reporting it as extracted.
-		return cached
-			.filter((s) => folderIds.has(s.folderId) && (s.state !== "extracted" || state.folderFiles[s.path]?.courseId === courseId))
-			.map((s) => ({ ...s }));
+		// A source deleted elsewhere becomes excluded (or drops out of
+		// folderFiles); never keep reporting it as extracted.
+		const out: CourseFileStatus[] = [];
+		for (const s of cached) {
+			if (!folderIds.has(s.folderId)) continue;
+			const rec = Object.hasOwn(state.folderFiles, s.path) ? state.folderFiles[s.path] : undefined;
+			if (rec?.courseId === courseId && rec.excluded) {
+				out.push({ path: s.path, folderId: s.folderId, state: "excluded" });
+			} else if (s.state === "extracted" && rec?.courseId !== courseId) {
+				continue;
+			} else if (s.state === "excluded" && !rec?.excluded) {
+				continue;
+			} else {
+				out.push({ ...s });
+			}
+		}
+		return out;
 	}
 	const out: CourseFileStatus[] = [];
 	for (const [absPath, rec] of Object.entries(state.folderFiles)) {
 		if (rec.courseId !== courseId || !folderIds.has(rec.folderId)) continue;
 		if (!fsSync.existsSync(/* turbopackIgnore: true */ absPath)) continue;
-		out.push({ path: absPath, folderId: rec.folderId, state: "extracted" });
+		out.push({ path: absPath, folderId: rec.folderId, state: rec.excluded ? "excluded" : "extracted" });
 	}
 	return out;
 }

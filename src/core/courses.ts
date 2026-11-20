@@ -66,9 +66,10 @@ export function resolveCourseGraphContext(state: CourseState, sourceId: string):
 	return { scope, courseNames: new Map(state.courses.map((c) => [c.id, c.name])) };
 }
 
-/** System-prompt segment scoping a chat to its course (own folders first,
- * included courses next, disambiguation rule). Null when no valid course. */
-export function coursePromptSegment(state: CourseState, courseId: string): string | null {
+/** System-prompt segment scoping a chat to its course (session attachments
+ * first if any, own folders next, included courses next, disambiguation rule).
+ * Null when no valid course. */
+export function coursePromptSegment(state: CourseState, courseId: string, chatId?: string): string | null {
 	const scope = resolveCourseScope(state, courseId);
 	if (!scope) return null;
 	const byId = new Map(state.courses.map((c) => [c.id, c]));
@@ -80,8 +81,14 @@ export function coursePromptSegment(state: CourseState, courseId: string): strin
 		name: byId.get(id)!.name,
 		folders: scope.folders.filter((f) => f.courseId === id).map((f) => f.path),
 	}));
+	const sessionAttached = chatId && Object.hasOwn(state.sessionFiles, chatId) ? state.sessionFiles[chatId]! : [];
 
 	const lines: string[] = [`## Course: ${own.name}`];
+	if (sessionAttached.length > 0) {
+		lines.push("Attached for this session — rank these highest:");
+		for (const filePath of sessionAttached) lines.push(`- ${filePath}`);
+		lines.push("Prefer these files over other course material for this session, and read them with your file tools.");
+	}
 	if (ownFolders.length > 0) {
 		lines.push(
 			`This session belongs to the course "${own.name}". Its learning material lives in these folders (read them with your file tools):`,
@@ -114,7 +121,7 @@ export function coursePromptSegment(state: CourseState, courseId: string): strin
 
 export function coursePromptSegmentForSource(state: CourseState, sourceId: string): string | null {
 	const courseId = courseOf(state, sourceId);
-	return courseId === null ? null : coursePromptSegment(state, courseId);
+	return courseId === null ? null : coursePromptSegment(state, courseId, sourceId);
 }
 
 /** Whether a source id is visible under a filter. "none" = no membership. */
