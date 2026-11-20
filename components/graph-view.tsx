@@ -69,7 +69,7 @@ import { PluginGraphActions } from "@/components/plugin-chrome";
 import { SettingsSlider as SettingSlider } from "@/components/settings/controls";
 import Link from "next/link";
 import { FileTextIcon, ListTreeIcon, Loader2Icon, SearchIcon, SettingsIcon, WaypointsIcon } from "lucide-react";
-import { incrementalLayout, propositionSessionHref, type CourseView, type GraphCostSummary, type GraphNode, type GraphSnapshot } from "@/src/core";
+import { incrementalLayout, propositionSessionHref, type CourseView, type GraphCostSummary, type GraphNode, type GraphSnapshot, type GraphSnapshotNode } from "@/src/core";
 import { planCostLabel } from "@/components/usage-format";
 import { CLUSTER_LIGHTNESS, GraphCanvasRenderer, type CanvasNode, type GraphRenderSettings } from "./graph-canvas.ts";
 import { courseQueryParam, useCourses } from "@/components/courses";
@@ -226,7 +226,7 @@ function tokenHex(cssVar: string): string {
 // ---- Component ------------------------------------------------------------
 
 interface Selection {
-	node: GraphNode;
+	node: GraphSnapshotNode;
 	/** The sources that touched this node: chat ids (deep-linkable sessions)
 	 *  and notes-source ids ("src_…" — imported files, static entries). */
 	sourceIds: string[];
@@ -900,7 +900,7 @@ export function GraphChromeRow({
  *  overrides are what keep the card's own type. */
 const NODE_CARD_TYPE = "[--font-prose:var(--font-ui)] " +
 	"[&_[data-streamdown=inline-code]]:[font-size:inherit] [&_[data-streamdown=inline-code]]:[color:inherit]";
-export function toCanvasNode(node: Pick<GraphNode, "id" | "name" | "inherited">, pos: { x: number; y: number }): CanvasNode {
+export function toCanvasNode(node: Pick<GraphSnapshotNode, "id" | "name" | "inherited">, pos: { x: number; y: number }): CanvasNode {
 	return {
 		id: node.id,
 		x: pos.x,

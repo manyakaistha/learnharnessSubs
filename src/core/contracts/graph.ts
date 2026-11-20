@@ -131,10 +131,6 @@ export interface GraphNode {
 	createdAt: string;
 	/** Every (chat, message) point where this proposition came up. */
 	provenance: ProvenancePoint[];
-	/** Course projection only: true when no provenance point is in the active course's own sources. */
-	inherited?: boolean;
-	/** Course projection only: course ids (in scope) that have provenance for this node. */
-	courses?: string[];
 }
 
 /** sessions.jsonl line — the emission checkpoint for one chat (which chats
